@@ -4,7 +4,9 @@ import logging
 import re
 from datetime import datetime
 from typing import Optional, Dict
+import httpx
 from telegram import Update
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import ContextTypes
 from core.security import restricted
 from core.models import CustomCommandConfig, SatispayPayment
@@ -320,5 +322,13 @@ async def sat_get_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Log degli errori imprevisti"""
+    # Gestione attenuata per errori di rete o timeout temporanei (es. httpx.ReadError durante getUpdates)
+    if isinstance(context.error, (NetworkError, TimedOut, httpx.HTTPError)):
+        logger.warning(
+            "Problema di rete temporaneo durante la comunicazione con Telegram: %s",
+            context.error,
+        )
+        return
+
     logger.error("Eccezione durante la gestione dell'aggiornamento:", exc_info=context.error)
 

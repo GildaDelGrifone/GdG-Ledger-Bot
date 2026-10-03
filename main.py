@@ -113,6 +113,9 @@ def create_telegram_app():
     app = (
         ApplicationBuilder()
         .token(settings.TELEGRAM_BOT_TOKEN)
+        .get_updates_read_timeout(30.0)
+        .read_timeout(30.0)
+        .connect_timeout(30.0)
         .post_init(post_init)
         .build()
     )

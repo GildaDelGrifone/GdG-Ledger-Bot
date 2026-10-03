@@ -133,3 +133,54 @@ def test_qr_keyboards():
     assert CALLBACK_QR_SKIP in wait_callbacks
 
 
+
+@pytest.mark.asyncio
+async def test_error_handler_network_error(caplog):
+    import logging
+    from unittest.mock import MagicMock
+    from telegram.error import NetworkError, TimedOut
+    import httpx
+    from bot.handlers import error_handler
+
+    mock_context = MagicMock()
+    mock_context.error = NetworkError("httpx.ReadError: ")
+
+    with caplog.at_level(logging.WARNING):
+        await error_handler(None, mock_context)
+
+    assert "Problema di rete temporaneo durante la comunicazione con Telegram" in caplog.text
+    # Non deve essere registrato come ERROR
+    assert not any(record.levelno == logging.ERROR for record in caplog.records)
+
+    # Test anche con TimedOut
+    caplog.clear()
+    mock_context.error = TimedOut("Request timed out")
+    with caplog.at_level(logging.WARNING):
+        await error_handler(None, mock_context)
+    assert "Problema di rete temporaneo durante la comunicazione con Telegram" in caplog.text
+    assert not any(record.levelno == logging.ERROR for record in caplog.records)
+
+    # Test con httpx.ReadError diretto
+    caplog.clear()
+    mock_context.error = httpx.ReadError("Connection closed")
+    with caplog.at_level(logging.WARNING):
+        await error_handler(None, mock_context)
+    assert "Problema di rete temporaneo durante la comunicazione con Telegram" in caplog.text
+    assert not any(record.levelno == logging.ERROR for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_error_handler_unexpected_error(caplog):
+    import logging
+    from unittest.mock import MagicMock
+    from bot.handlers import error_handler
+
+    mock_context = MagicMock()
+    mock_context.error = RuntimeError("Database connection failed")
+
+    with caplog.at_level(logging.ERROR):
+        await error_handler(None, mock_context)
+
+    assert "Eccezione durante la gestione dell'aggiornamento:" in caplog.text
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
+
