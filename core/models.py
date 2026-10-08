@@ -5,8 +5,8 @@ from pydantic import BaseModel, Field, field_validator
 
 def format_datetime_for_sheet(dt_val: Optional[str]) -> str:
     """
-    Converte una data/ora in formato standard DD/MM/YYYY HH:MM:SS per Google Sheets.
-    Supporta conversioni da YYYY-MM-DD HH:MM:SS, YYYY-MM-DD HH:MM, ISO format, ecc.
+    Converte una data/ora in formato standard DD/MM/YYYY HH.MM.SS per Google Sheets.
+    Supporta conversioni da YYYY-MM-DD HH.MM.SS, YYYY-MM-DD HH:MM, ISO format, ecc.
     """
     if not dt_val:
         return ""

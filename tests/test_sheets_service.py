@@ -99,7 +99,7 @@ def test_transaction_date_format_saved_in_sheet(mock_sheets: MockSheetsService):
         created_at="2026-10-08 14:35:22"
     )
 
-    # Both date_time and created_at must be formatted as DD/MM/YYYY HH:MM:SS
+    # Both date_time and created_at must be formatted as DD/MM/YYYY HH.MM.SS
     assert tx.date_time == "08/10/2026 14:30:00"
     assert tx.created_at == "08/10/2026 14:35:22"
 

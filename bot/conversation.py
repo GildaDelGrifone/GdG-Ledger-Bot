@@ -102,7 +102,7 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             update,
             "📅 <b>Data e Ora della transazione:</b>\n"
             "Premi il pulsante per impostare data e ora attuale, oppure invia <code>/now</code> "
-            "o scrivi manualmente la data (<code>GG/MM/AAAA HH:MM</code> o <code>AAAA-MM-GG HH:MM</code>).",
+            "o scrivi manualmente la data (<code>GG/MM/AAAA HH.MM</code> o <code>AAAA-MM-GG HH.MM</code>).",
             reply_markup=get_now_keyboard(),
         )
         return STATE_DATETIME

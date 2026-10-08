@@ -1,0 +1,8 @@
+# Configurazione macro per registrazione quota socio
+command: "r"
+description: "Registra quota rinnovo socio"
+defaults:
+  date_time: "now"
+  flow: "Entrata"
+  amount: 20.00
+  description_prefix: "Rinnovo: "
