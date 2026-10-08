@@ -1,3 +1,4 @@
+import asyncio
 import html
 import json
 import logging
@@ -134,7 +135,7 @@ async def link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Utente @{username} (ID: {user_id}) ha richiesto collegamento transazione #{tx_id} a Satispay ID: {satispay_id}")
     sheets = get_sheets_service()
 
-    success = sheets.link_satispay_id(tx_id, satispay_id)
+    success = await asyncio.to_thread(sheets.link_satispay_id, tx_id, satispay_id)
     if success:
         await update.effective_chat.send_message(
             f"✅ Transazione <code>#{tx_id}</code> collegata con successo all'ID Satispay:\n<code>{html.escape(satispay_id)}</code>",
@@ -181,7 +182,7 @@ async def unlink_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Utente @{username} (ID: {user_id}) ha richiesto scollegamento Satispay ID: {satispay_id} da {target_descr}")
 
     sheets = get_sheets_service()
-    count = sheets.unlink_satispay_id(satispay_id, transaction_id=tx_id)
+    count = await asyncio.to_thread(sheets.unlink_satispay_id, satispay_id, transaction_id=tx_id)
 
     if count > 0:
         target_str = f"dalla transazione #{tx_id}" if tx_id is not None else "da tutte le transazioni collegate"

@@ -1,6 +1,7 @@
+import time
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from config import settings
 from core.models import Transaction
 
@@ -162,12 +163,17 @@ class MockSheetsService(SheetsServiceInterface):
 class GoogleSheetsService(SheetsServiceInterface):
     """
     Implementazione reale del servizio tramite API di Google Sheets e gspread
+    con caching della cartella di lavoro e dei dati per massima velocità e reattività.
     """
 
     def __init__(self):
         import gspread
         self.gspread = gspread
         self.client = None
+        self._spreadsheet = None
+        self._worksheets: Dict[str, Any] = {}
+        self._rows_cache: Dict[str, Tuple[float, List[List[Any]]]] = {}
+        self._cache_ttl = 10.0  # Cache valida per 10 secondi per velocizzare step consecutivi
         self._init_client()
 
     def _init_client(self):
@@ -186,44 +192,79 @@ class GoogleSheetsService(SheetsServiceInterface):
             return raw_id.split("/d/")[1].split("/")[0]
         return raw_id
 
+    def _get_spreadsheet(self):
+        if self._spreadsheet is None:
+            spreadsheet_id = self._clean_spreadsheet_id(settings.GOOGLE_SPREADSHEET_ID)
+            self._spreadsheet = self.client.open_by_key(spreadsheet_id)
+        return self._spreadsheet
+
     def _get_worksheet(self, worksheet_name: Optional[str] = None):
         name = worksheet_name or settings.GOOGLE_WORKSHEET_NAME
-        spreadsheet_id = self._clean_spreadsheet_id(settings.GOOGLE_SPREADSHEET_ID)
-        spreadsheet = self.client.open_by_key(spreadsheet_id)
+        if name in self._worksheets:
+            return self._worksheets[name]
+
+        spreadsheet = self._get_spreadsheet()
         try:
-            return spreadsheet.worksheet(name)
+            ws = spreadsheet.worksheet(name)
         except self.gspread.exceptions.WorksheetNotFound:
             logger.info(f"Foglio '{name}' non trovato. Creazione nuovo foglio...")
             ws = spreadsheet.add_worksheet(title=name, rows=1000, cols=20)
             ws.append_row(Transaction.sheet_headers())
-            return ws
+
+        self._worksheets[name] = ws
+        return ws
+
+    def _get_rows(self, worksheet_name: Optional[str] = None, force_refresh: bool = False) -> List[List[Any]]:
+        name = worksheet_name or settings.GOOGLE_WORKSHEET_NAME
+        now = time.time()
+        if not force_refresh and name in self._rows_cache:
+            cache_time, cached_rows = self._rows_cache[name]
+            if now - cache_time < self._cache_ttl:
+                return cached_rows
+
+        ws = self._get_worksheet(name)
+        try:
+            all_values = ws.get_all_values()
+        except Exception:
+            # In caso di sessione scaduta, resetta i riferimenti e riprova
+            self._worksheets.pop(name, None)
+            self._spreadsheet = None
+            ws = self._get_worksheet(name)
+            all_values = ws.get_all_values()
+
+        self._rows_cache[name] = (now, all_values)
+        return all_values
+
+    def _invalidate_cache(self, worksheet_name: Optional[str] = None):
+        name = worksheet_name or settings.GOOGLE_WORKSHEET_NAME
+        self._rows_cache.pop(name, None)
 
     def ensure_headers(self, worksheet_name: Optional[str] = None) -> None:
-        ws = self._get_worksheet(worksheet_name)
-        first_row = ws.row_values(1)
-        if not first_row:
+        name = worksheet_name or settings.GOOGLE_WORKSHEET_NAME
+        ws = self._get_worksheet(name)
+        rows = self._get_rows(name)
+        if not rows or not rows[0]:
             headers = Transaction.sheet_headers()
             ws.insert_row(headers, 1)
+            self._invalidate_cache(name)
             logger.info(f"Intestazioni inserite nel foglio '{ws.title}'")
 
     def get_last_transaction_id(self, worksheet_name: Optional[str] = None) -> int:
-        ws = self._get_worksheet(worksheet_name)
-        col_values = ws.col_values(1)
+        rows = self._get_rows(worksheet_name)[1:]
         last_id = 0
-        for val in col_values[1:]:
-            if str(val).strip().isdigit():
-                num = int(val)
-                if num > last_id:
-                    last_id = num
+        for row in rows:
+            if len(row) > 0 and str(row[0]).strip().isdigit():
+                val = int(row[0])
+                if val > last_id:
+                    last_id = val
         return last_id
 
     def get_last_box_money(self, worksheet_name: Optional[str] = None) -> float:
-        ws = self._get_worksheet(worksheet_name)
-        col_values = ws.col_values(8)
-        for val in reversed(col_values[1:]):
-            if val:
+        rows = self._get_rows(worksheet_name)[1:]
+        for row in reversed(rows):
+            if len(row) > 7 and row[7]:
                 try:
-                    cleaned = str(val).replace("€", "").replace(",", ".").strip()
+                    cleaned = str(row[7]).replace("€", "").replace(",", ".").strip()
                     if cleaned:
                         return float(cleaned)
                 except ValueError:
@@ -231,21 +272,30 @@ class GoogleSheetsService(SheetsServiceInterface):
         return 0.0
 
     def get_last_receipt_number(self, worksheet_name: Optional[str] = None) -> int:
-        ws = self._get_worksheet(worksheet_name)
-        col_values = ws.col_values(9)
+        rows = self._get_rows(worksheet_name)[1:]
         last_receipt = 0
-        for val in col_values[1:]:
-            if str(val).strip().isdigit():
-                num = int(val)
-                if num > last_receipt:
-                    last_receipt = num
+        for row in rows:
+            if len(row) > 8 and str(row[8]).strip().isdigit():
+                val = int(row[8])
+                if val > last_receipt:
+                    last_receipt = val
         return last_receipt
 
     def add_transaction(self, transaction: Transaction, worksheet_name: Optional[str] = None) -> Transaction:
-        ws = self._get_worksheet(worksheet_name)
-        new_id = self.get_last_transaction_id(worksheet_name) + 1
+        name = worksheet_name or settings.GOOGLE_WORKSHEET_NAME
+        ws = self._get_worksheet(name)
+        new_id = self.get_last_transaction_id(name) + 1
         transaction.id = new_id
-        ws.append_row(transaction.to_sheet_row())
+        row_data = transaction.to_sheet_row()
+        ws.append_row(row_data)
+
+        # Aggiorna la cache locale per includere immediatamente la nuova riga
+        if name in self._rows_cache:
+            cache_time, cached_rows = self._rows_cache[name]
+            cached_rows.append(row_data)
+        else:
+            self._invalidate_cache(name)
+
         logger.info(
             f"[GoogleSheets] Scrittura su foglio '{ws.title}': Transazione ID #{new_id} registrata con successo | "
             f"Operatore: @{transaction.telegram_username} (ID: {transaction.telegram_user_id}) | "
@@ -255,25 +305,25 @@ class GoogleSheetsService(SheetsServiceInterface):
         return transaction
 
     def link_satispay_id(self, transaction_id: int, satispay_id: str, worksheet_name: Optional[str] = None) -> bool:
-        ws = self._get_worksheet(worksheet_name)
-        col_values = ws.col_values(1)
+        name = worksheet_name or settings.GOOGLE_WORKSHEET_NAME
+        rows = self._get_rows(name, force_refresh=True)
         target_row = None
-        for idx, val in enumerate(col_values, start=1):
-            if idx == 1:
-                continue
-            if str(val).strip() == str(transaction_id):
+        for idx, row in enumerate(rows[1:], start=2):
+            if len(row) > 0 and str(row[0]).strip() == str(transaction_id):
                 target_row = idx
                 break
 
         if target_row is not None:
+            ws = self._get_worksheet(name)
             ws.update_cell(target_row, 12, satispay_id)
+            self._invalidate_cache(name)
             logger.info(
                 f"[GoogleSheets] Scrittura su foglio '{ws.title}': "
                 f"Collegato Satispay ID '{satispay_id}' alla riga {target_row} (Transazione ID #{transaction_id})"
             )
             return True
         logger.warning(
-            f"[GoogleSheets] Tentativo collegamento fallito: Transazione ID #{transaction_id} non trovata nel foglio '{ws.title}'"
+            f"[GoogleSheets] Tentativo collegamento fallito: Transazione ID #{transaction_id} non trovata nel foglio"
         )
         return False
 
@@ -283,19 +333,20 @@ class GoogleSheetsService(SheetsServiceInterface):
         transaction_id: Optional[int] = None,
         worksheet_name: Optional[str] = None
     ) -> int:
-        ws = self._get_worksheet(worksheet_name)
-        col_satispay = ws.col_values(12)
-        col_ids = ws.col_values(1)
+        name = worksheet_name or settings.GOOGLE_WORKSHEET_NAME
+        rows = self._get_rows(name, force_refresh=True)
+        ws = self._get_worksheet(name)
         unlinked_count = 0
 
-        for idx, val in enumerate(col_satispay, start=1):
-            if idx == 1:
-                continue
-            if str(val).strip() == satispay_id:
-                row_id = col_ids[idx - 1] if idx - 1 < len(col_ids) else ""
+        for idx, row in enumerate(rows[1:], start=2):
+            if len(row) > 11 and row[11] == satispay_id:
+                row_id = row[0] if len(row) > 0 else ""
                 if transaction_id is None or str(row_id).strip() == str(transaction_id):
                     ws.update_cell(idx, 12, "")
                     unlinked_count += 1
+
+        if unlinked_count > 0:
+            self._invalidate_cache(name)
 
         target_info = f"dalla transazione #{transaction_id}" if transaction_id is not None else "da tutte le transazioni collegate"
         logger.info(
@@ -305,11 +356,13 @@ class GoogleSheetsService(SheetsServiceInterface):
         return unlinked_count
 
     def get_transaction_by_id(self, transaction_id: int, worksheet_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        ws = self._get_worksheet(worksheet_name)
-        records = ws.get_all_records()
-        for rec in records:
-            if str(rec.get("ID", "")).strip() == str(transaction_id):
-                return rec
+        rows = self._get_rows(worksheet_name)
+        if not rows:
+            return None
+        headers = rows[0]
+        for row in rows[1:]:
+            if len(row) > 0 and str(row[0]).strip() == str(transaction_id):
+                return {headers[i]: row[i] if i < len(row) else "" for i in range(len(headers))}
         return None
 
 
