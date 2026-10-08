@@ -19,9 +19,11 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
   * Invia un riepilogo formattato in chat alla conclusione dell'inserimento.
 * **Archiviazione Cloud su Google Sheets**:
   * Struttura a colonne ordinata con autoincremento progressivo dell'ID transazione.
+  * Formato date standardizzato: tutte le colonne temporali (*Data e Ora* e *Data Registrazione*) sono salvate in formato `GG/MM/AAAA HH:MM:SS` (`DD/MM/YYYY HH:MM:SS`).
   * Auto-sanitizzazione dell'ID: supporta sia l'ID pulito che l'URL completo di Google Drive.
   * Supporto a fogli multipli nella stessa cartella di lavoro (tab specificabile da `.env`).
   * Modalità Mock locale (`USE_MOCK_SHEETS=true`) per test immediati anche senza credenziali Google configurate.
+  * **Prestazioni e Reattività Elevate**: Caching intelligente della cartella di lavoro e dei dati (TTL 10s con invalidazione immediata in scrittura), esecuzione asincrona in thread separati (`asyncio.to_thread`) e risposta immediata alle callback dei pulsanti per eliminare qualsiasi tempo di attesa o spinner di caricamento.
 * **Integrazione Satispay Business 100% Autonoma (Polling + SQLite)**:
   * **Nessun Webhook, porta aperta o Cloudflare Tunnel**: il bot interroga periodicamente le API di Satispay in background tramite `JobQueue` interna.
   * **Persistenza Locale su SQLite (`satispay_history.db`)**: memorizza i pagamenti ricevuti. Al riavvio del bot, recupera automaticamente qualsiasi transazione avvenuta a PC spento (Offline Catch-up) senza duplicare notifiche.

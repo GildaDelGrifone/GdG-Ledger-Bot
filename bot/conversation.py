@@ -72,13 +72,18 @@ def get_user_mention(update: Update) -> str:
     return f'👤 <a href="tg://user?id={user.id}">{safe_name}</a>'
 
 
-async def send_msg(update: Update, text: str, reply_markup=None, tag_user: bool = True):
-    """Helper per inviare o modificare un messaggio in base al tipo di update con tag esplicito utente"""
+async def ack_callback_query(update: Update) -> None:
+    """Risponde immediatamente alla callback query per rimuovere lo spinner di caricamento su Telegram"""
     if update.callback_query:
         try:
             await update.callback_query.answer()
         except Exception as e:
             logger.debug(f"Impossibile rispondere alla callback query (forse scaduta): {e}")
+
+
+async def send_msg(update: Update, text: str, reply_markup=None, tag_user: bool = True):
+    """Helper per inviare o modificare un messaggio in base al tipo di update con tag esplicito utente"""
+    await ack_callback_query(update)
 
     user_tag = get_user_mention(update) if tag_user else ""
     if user_tag and not text.startswith(user_tag):
@@ -119,7 +124,7 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # 3. Cassa Iniziale / Conferma Saldo Cassa Attuale
     if "box_money" not in data:
-        last_box = sheets.get_last_box_money()
+        last_box = await asyncio.to_thread(sheets.get_last_box_money)
         context.user_data["suggested_last_box"] = last_box
 
         if data.get("method") == "Contanti":
@@ -210,7 +215,7 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # 8. Numero Ricevuta
     if "receipt_number" not in data:
-        last_receipt = sheets.get_last_receipt_number()
+        last_receipt = await asyncio.to_thread(sheets.get_last_receipt_number)
         suggested_receipt = last_receipt + 1
         context.user_data["suggested_receipt"] = suggested_receipt
         await send_msg(
@@ -280,7 +285,7 @@ async def finalize_and_save_transaction(update: Update, context: ContextTypes.DE
     )
 
     try:
-        registered_tx = sheets.add_transaction(tx)
+        registered_tx = await asyncio.to_thread(sheets.add_transaction, tx)
     except Exception as e:
         logger.error(f"Errore durante salvataggio su foglio: {e}")
         await send_msg(
@@ -401,6 +406,7 @@ async def handle_datetime_input(update: Update, context: ContextTypes.DEFAULT_TY
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
+        await ack_callback_query(update)
         query_data = update.callback_query.data
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
@@ -424,6 +430,7 @@ async def handle_method_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
+        await ack_callback_query(update)
         query_data = update.callback_query.data
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
@@ -453,6 +460,7 @@ async def handle_box_before_input(update: Update, context: ContextTypes.DEFAULT_
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
+        await ack_callback_query(update)
         query_data = update.callback_query.data
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
@@ -492,6 +500,7 @@ async def handle_flow_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
+        await ack_callback_query(update)
         query_data = update.callback_query.data
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
@@ -541,6 +550,7 @@ async def handle_box_after_input(update: Update, context: ContextTypes.DEFAULT_T
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
+        await ack_callback_query(update)
         query_data = update.callback_query.data
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
@@ -566,6 +576,7 @@ async def handle_receipt_input(update: Update, context: ContextTypes.DEFAULT_TYP
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
+        await ack_callback_query(update)
         query_data = update.callback_query.data
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
@@ -593,6 +604,7 @@ async def handle_qr_ask_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
+        await ack_callback_query(update)
         query_data = update.callback_query.data
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
@@ -747,6 +759,7 @@ async def wait_for_qr_payment(
 async def handle_qr_waiting_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Gestisce l'input durante l'attesa del pagamento QR Code (salta o annulla)"""
     if update.callback_query:
+        await ack_callback_query(update)
         query_data = update.callback_query.data
         if query_data == CALLBACK_CANCEL:
             context.user_data["qr_cancelled"] = True
@@ -776,6 +789,7 @@ async def handle_qr_waiting_input(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Annulla l'operazione in corso e azzera lo stato"""
+    await ack_callback_query(update)
     context.user_data.clear()
     await send_msg(update, "❌ Operazione annullata. Nessun dato è stato registrato.")
     return ConversationHandler.END
