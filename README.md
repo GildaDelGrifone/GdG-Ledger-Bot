@@ -9,11 +9,11 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
 * **Sicurezza Chat Autorizzata**: Il bot risponde unicamente all'ID chat configurato nel file `.env`, ignorando ed isolando ogni comando proveniente da altre chat o utenti non autorizzati.
 * **Tag Esplicito dell'Utente nei Gruppi**: Il bot antepone a ogni domanda il tag diretto dell'utente (`👤 @username` o menzione diretta Telegram). In questo modo, anche se più membri interagiscono contemporaneamente nello stesso gruppo, è sempre evidente a colpo d'occhio chi deve rispondere.
 * **Procedura Guidata `/write` (shortcut `/w`)**:
-  * Richiede sequenzialmente: Data e Ora, Metodo (Contanti o Satispay), Cassa iniziale (solo se contanti), Descrizione, Flusso (Entrata/Uscita), Importo, Cassa aggiornata (solo se contanti) e Numero ricevuta.
+  * Richiede sequenzialmente: Data e Ora, Metodo (Contanti o Satispay), Cassa iniziale (o conferma saldo cassa attuale per Satispay), Descrizione, Flusso (Entrata/Uscita), Importo, Cassa aggiornata (solo se contanti, altrimenti allineata automaticamente) e Numero ricevuta.
   * Interfaccia ottimizzata con **pulsanti interattivi (Inline Buttons)**:
     * Pulsante per impostare l'orario attuale (`/now`).
     * Pulsante per selezionare l'ultimo saldo cassa registrato su Google Sheets.
-    * Calcolo automatico della cassa aggiornata (Saldo Iniziale ± Importo) con pulsante di conferma rapida o inserimento manuale.
+    * Calcolo automatico della cassa aggiornata (Saldo Iniziale ± Importo per contanti; saldo confermato per Satispay sia su colonna D che su colonna H) con pulsante di conferma rapida o inserimento manuale.
     * Suggerimento progressivo per il numero di ricevuta (Ultimo registrato + 1).
   * Registra l'username e l'ID Telegram dell'operatore per audit e sicurezza.
   * Invia un riepilogo formattato in chat alla conclusione dell'inserimento.

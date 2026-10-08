@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -11,7 +12,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
-from core.models import Transaction, CustomCommandConfig
+from core.models import Transaction, CustomCommandConfig, format_datetime_for_sheet
 from core.security import is_chat_allowed
 from services.sheets_service import get_sheets_service
 from services.satispay_service import satispay_service
@@ -66,9 +67,9 @@ def get_user_mention(update: Update) -> str:
     if not user:
         return ""
     if user.username:
-        return f"👤 @{user.username}"
-    safe_name = (user.first_name or "Utente").replace("[", "").replace("]", "").replace("`", "")
-    return f"👤 [{safe_name}](tg://user?id={user.id})"
+        return f"👤 @{html.escape(user.username)}"
+    safe_name = html.escape(user.first_name or "Utente")
+    return f'👤 <a href="tg://user?id={user.id}">{safe_name}</a>'
 
 
 async def send_msg(update: Update, text: str, reply_markup=None, tag_user: bool = True):
@@ -86,7 +87,7 @@ async def send_msg(update: Update, text: str, reply_markup=None, tag_user: bool 
         formatted_text = text
 
     return await update.effective_chat.send_message(
-        text=formatted_text, reply_markup=reply_markup, parse_mode="Markdown"
+        text=formatted_text, reply_markup=reply_markup, parse_mode="HTML"
     )
 async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
@@ -99,9 +100,9 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if "date_time" not in data:
         await send_msg(
             update,
-            "📅 *Data e Ora della transazione:*\n"
-            "Premi il pulsante per impostare data e ora attuale, oppure invia `/now` "
-            "o scrivi manualmente la data (`GG/MM/AAAA HH:MM` o `AAAA-MM-GG HH:MM`).",
+            "📅 <b>Data e Ora della transazione:</b>\n"
+            "Premi il pulsante per impostare data e ora attuale, oppure invia <code>/now</code> "
+            "o scrivi manualmente la data (<code>GG/MM/AAAA HH:MM</code> o <code>AAAA-MM-GG HH:MM</code>).",
             reply_markup=get_now_keyboard(),
         )
         return STATE_DATETIME
@@ -110,21 +111,35 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if "method" not in data:
         await send_msg(
             update,
-            "💳 *Metodo di pagamento:*\n"
+            "💳 <b>Metodo di pagamento:</b>\n"
             "Come è stata effettuata la transazione?",
             reply_markup=get_method_keyboard(),
         )
         return STATE_METHOD
 
-    # 3. Cassa Iniziale (solo se Contanti)
-    if data.get("method") == "Contanti" and "box_money" not in data:
+    # 3. Cassa Iniziale / Conferma Saldo Cassa Attuale
+    if "box_money" not in data:
         last_box = sheets.get_last_box_money()
         context.user_data["suggested_last_box"] = last_box
+
+        if data.get("method") == "Contanti":
+            prompt_title = "🪙 <b>Cassa iniziale (prima della transazione):</b>\n"
+            prompt_desc = (
+                f"Ultimo saldo contanti rilevato nel registro: <b>{last_box:.2f} €</b>\n\n"
+                "Premi il pulsante per confermarlo oppure scrivi l'importo manualmente."
+            )
+        else:
+            prompt_title = "🪙 <b>Conferma saldo cassa attuale:</b>\n"
+            prompt_desc = (
+                f"Ultimo saldo contanti rilevato nel registro: <b>{last_box:.2f} €</b>\n\n"
+                "Verifica e conferma il denaro presente in cassa al momento della transazione, "
+                "anche se il pagamento è effettuato tramite Satispay.\n"
+                "Premi il pulsante per confermarlo oppure scrivi l'importo manualmente."
+            )
+
         await send_msg(
             update,
-            f"🪙 *Cassa iniziale (prima della transazione):*\n"
-            f"Ultimo saldo contanti rilevato nel registro: *{last_box:.2f} €*\n\n"
-            "Premi il pulsante per confermarlo oppure scrivi l'importo manualmente.",
+            f"{prompt_title}{prompt_desc}",
             reply_markup=get_box_money_keyboard(last_box),
         )
         return STATE_BOX_BEFORE
@@ -137,15 +152,15 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         extra_info = ""
         info_lines = []
         if prefix:
-            info_lines.append(f"• *Prefisso:* `{prefix}`")
+            info_lines.append(f"• <b>Prefisso:</b> <code>{html.escape(prefix)}</code>")
         if suffix:
-            info_lines.append(f"• *Suffisso:* `{suffix}`")
+            info_lines.append(f"• <b>Suffisso:</b> <code>{html.escape(suffix)}</code>")
         if info_lines:
-            extra_info = "\n\n💡 _Personalizzazioni comando:_\n" + "\n".join(info_lines)
+            extra_info = "\n\n💡 <i>Personalizzazioni comando:</i>\n" + "\n".join(info_lines)
 
         await send_msg(
             update,
-            "📝 *Descrizione della transazione:*\n"
+            "📝 <b>Descrizione della transazione:</b>\n"
             f"Inserisci una breve descrizione della spesa o dell'entrata.{extra_info}",
             reply_markup=get_cancel_keyboard(),
         )
@@ -155,7 +170,7 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if "flow" not in data:
         await send_msg(
             update,
-            "📊 *Flusso di cassa:*\n"
+            "📊 <b>Flusso di cassa:</b>\n"
             "I fondi sono entrati o usciti?",
             reply_markup=get_flow_keyboard(),
         )
@@ -165,29 +180,33 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if "amount" not in data:
         await send_msg(
             update,
-            "💰 *Importo:*\n"
-            "Inserisci la cifra in euro (es. `15.50` o `15,50`).",
+            "💰 <b>Importo:</b>\n"
+            "Inserisci la cifra in euro (es. <code>15.50</code> o <code>15,50</code>).",
             reply_markup=get_cancel_keyboard(),
         )
         return STATE_AMOUNT
 
-    # 7. Cassa Aggiornata (solo se Contanti)
-    if data.get("method") == "Contanti" and "box_money_updated" not in data:
-        box_init = data.get("box_money", 0.0)
-        amount = data.get("amount", 0.0)
-        flow = data.get("flow", "Entrata")
-        calc_box = box_init + amount if flow == "Entrata" else box_init - amount
-        context.user_data["suggested_box_after"] = calc_box
+    # 7. Cassa Aggiornata (solo se Contanti, altrimenti allineata a cassa attuale)
+    if "box_money_updated" not in data:
+        if data.get("method") == "Contanti":
+            box_init = data.get("box_money", 0.0)
+            amount = data.get("amount", 0.0)
+            flow = data.get("flow", "Entrata")
+            calc_box = box_init + amount if flow == "Entrata" else box_init - amount
+            context.user_data["suggested_box_after"] = calc_box
 
-        sign = "+" if flow == "Entrata" else "-"
-        await send_msg(
-            update,
-            f"🪙 *Cassa aggiornata (dopo la transazione):*\n"
-            f"Saldo calcolato: *{calc_box:.2f} €* ({box_init:.2f} € {sign} {amount:.2f} €)\n\n"
-            "Premi il pulsante per confermare il saldo calcolato oppure scrivi il valore reale se differisce.",
-            reply_markup=get_box_updated_keyboard(calc_box),
-        )
-        return STATE_BOX_AFTER
+            sign = "+" if flow == "Entrata" else "-"
+            await send_msg(
+                update,
+                f"🪙 <b>Cassa aggiornata (dopo la transazione):</b>\n"
+                f"Saldo calcolato: <b>{calc_box:.2f} €</b> ({box_init:.2f} € {sign} {amount:.2f} €)\n\n"
+                "Premi il pulsante per confermare il saldo calcolato oppure scrivi il valore reale se differisce.",
+                reply_markup=get_box_updated_keyboard(calc_box),
+            )
+            return STATE_BOX_AFTER
+        else:
+            # Per Satispay il denaro in cassa non varia; la cassa aggiornata (Colonna H) coincide con la cassa iniziale (Colonna D)
+            data["box_money_updated"] = data.get("box_money", 0.0)
 
     # 8. Numero Ricevuta
     if "receipt_number" not in data:
@@ -196,10 +215,10 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data["suggested_receipt"] = suggested_receipt
         await send_msg(
             update,
-            f"🧾 *Numero ricevuta:*\n"
-            f"Ultima ricevuta registrata: *#{last_receipt}*\n\n"
-            f"Premi il pulsante per confermare la numero *#{suggested_receipt}* "
-            "oppure scrivi il numero manualmente (scrivi `0` se non applicabile).",
+            f"🧾 <b>Numero ricevuta:</b>\n"
+            f"Ultima ricevuta registrata: <b>#{last_receipt}</b>\n\n"
+            f"Premi il pulsante per confermare la numero <b>#{suggested_receipt}</b> "
+            "oppure scrivi il numero manualmente (scrivi <code>0</code> se non applicabile).",
             reply_markup=get_receipt_keyboard(suggested_receipt),
         )
         return STATE_RECEIPT
@@ -213,10 +232,10 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         amount = data.get("amount", 0.0)
         await send_msg(
             update,
-            f"📱 *Pagamento Satispay POS*\n"
-            f"Vuoi generare un QR Code per far pagare all'istante l'importo di *{amount:.2f} €*?\n\n"
-            f"• Se premi *📱 Genera QR Code*, verrà mostrato il codice QR e la transazione verrà registrata e collegata in automatico a pagamento avvenuto.\n"
-            f"• Se premi *⏩ Salta e registra subito*, la transazione verrà registrata subito nel foglio senza attendere il pagamento.",
+            f"📱 <b>Pagamento Satispay POS</b>\n"
+            f"Vuoi generare un QR Code per far pagare all'istante l'importo di <b>{amount:.2f} €</b>?\n\n"
+            "• Se premi <b>📱 Genera QR Code</b>, verrà mostrato il codice QR e la transazione verrà registrata e collegata in automatico a pagamento avvenuto.\n"
+            "• Se premi <b>⏩ Salta e registra subito</b>, la transazione verrà registrata subito nel foglio senza attendere il pagamento.",
             reply_markup=get_qr_ask_keyboard(),
         )
         return STATE_QR_ASK
@@ -239,6 +258,13 @@ async def finalize_and_save_transaction(update: Update, context: ContextTypes.DE
     username = user.username or user.full_name or "Anonimo"
     user_id = user.id
 
+    # Per Satispay, allinea cassa iniziale e cassa aggiornata al saldo confermato
+    if data.get("method") == "Satispay":
+        if data.get("box_money_updated") is None and data.get("box_money") is not None:
+            data["box_money_updated"] = data.get("box_money")
+        elif data.get("box_money") is None and data.get("box_money_updated") is not None:
+            data["box_money"] = data.get("box_money_updated")
+
     tx = Transaction(
         date_time=data["date_time"],
         method=data["method"],
@@ -259,7 +285,7 @@ async def finalize_and_save_transaction(update: Update, context: ContextTypes.DE
         logger.error(f"Errore durante salvataggio su foglio: {e}")
         await send_msg(
             update,
-            f"❌ *Errore durante il salvataggio sul foglio di calcolo:*\n`{e}`"
+            f"❌ <b>Errore durante il salvataggio sul foglio di calcolo:</b>\n<code>{html.escape(str(e))}</code>"
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -269,27 +295,33 @@ async def finalize_and_save_transaction(update: Update, context: ContextTypes.DE
     if registered_tx.method == "Contanti":
         b_init = f"{registered_tx.box_money:.2f} €" if registered_tx.box_money is not None else "-"
         b_upd = f"{registered_tx.box_money_updated:.2f} €" if registered_tx.box_money_updated is not None else "-"
-        box_info = f"🪙 *Cassa iniziale:* `{b_init}`\n🪙 *Cassa aggiornata:* `{b_upd}`\n"
+        box_info = f"🪙 <b>Cassa iniziale:</b> <code>{b_init}</code>\n🪙 <b>Cassa aggiornata:</b> <code>{b_upd}</code>\n"
+    elif registered_tx.box_money is not None:
+        b_val = f"{registered_tx.box_money:.2f} €"
+        box_info = f"🪙 <b>Cassa attuale confermata:</b> <code>{b_val}</code>\n"
 
     sat_info = ""
     if registered_tx.satispay_id:
-        sat_info = f"📱 *ID Satispay Collegato:* `{registered_tx.satispay_id}`\n"
+        sat_info = f"📱 <b>ID Satispay Collegato:</b> <code>{html.escape(registered_tx.satispay_id)}</code>\n"
 
     flow_emoji = "➕" if registered_tx.flow == "Entrata" else "➖"
     method_emoji = "💵" if registered_tx.method == "Contanti" else "📱"
 
+    esc_desc = html.escape(registered_tx.description)
+    esc_user = html.escape(registered_tx.telegram_username)
+
     summary = (
-        "✅ *Transazione Registrata con Successo!*\n\n"
-        f"🆔 *ID Transazione:* `#{registered_tx.id}`\n"
-        f"📅 *Data:* `{registered_tx.date_time}`\n"
-        f"{method_emoji} *Metodo:* `{registered_tx.method}`\n"
-        f"📝 *Descrizione:* {registered_tx.description}\n"
-        f"{flow_emoji} *Flusso:* `{registered_tx.flow}`\n"
-        f"💰 *Importo:* `{registered_tx.amount:.2f} €`\n"
+        "✅ <b>Transazione Registrata con Successo!</b>\n\n"
+        f"🆔 <b>ID Transazione:</b> <code>#{registered_tx.id}</code>\n"
+        f"📅 <b>Data:</b> <code>{html.escape(registered_tx.date_time)}</code>\n"
+        f"{method_emoji} <b>Metodo:</b> <code>{html.escape(registered_tx.method)}</code>\n"
+        f"📝 <b>Descrizione:</b> {esc_desc}\n"
+        f"{flow_emoji} <b>Flusso:</b> <code>{html.escape(registered_tx.flow)}</code>\n"
+        f"💰 <b>Importo:</b> <code>{registered_tx.amount:.2f} €</code>\n"
         f"{box_info}"
         f"{sat_info}"
-        f"🧾 *Ricevuta:* `#{registered_tx.receipt_number}`\n"
-        f"👤 *Registrato da:* @{registered_tx.telegram_username} (`{registered_tx.telegram_user_id}`)"
+        f"🧾 <b>Ricevuta:</b> <code>#{registered_tx.receipt_number}</code>\n"
+        f"👤 <b>Registrato da:</b> @{esc_user} (<code>{registered_tx.telegram_user_id}</code>)"
     )
 
     await send_msg(update, summary)
@@ -328,7 +360,7 @@ def make_custom_command_starter(config: CustomCommandConfig):
             if defaults.date_time.lower() == "now":
                 data["date_time"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             else:
-                data["date_time"] = defaults.date_time
+                data["date_time"] = format_datetime_for_sheet(defaults.date_time)
 
         # Pre-compila metodo
         if defaults.method:
@@ -355,6 +387,8 @@ def make_custom_command_starter(config: CustomCommandConfig):
         # Pre-compila cassa
         if defaults.box_money is not None:
             data["box_money"] = float(defaults.box_money)
+            if defaults.method == "Satispay":
+                data["box_money_updated"] = float(defaults.box_money)
 
         context.user_data["tx_data"] = data
         return await advance_or_finish(update, context)
@@ -381,7 +415,7 @@ async def handle_datetime_input(update: Update, context: ContextTypes.DEFAULT_TY
         data["date_time"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         return await advance_or_finish(update, context)
 
-    data["date_time"] = text
+    data["date_time"] = format_datetime_for_sheet(text)
     return await advance_or_finish(update, context)
 
 
@@ -410,7 +444,7 @@ async def handle_method_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         data["method"] = "Satispay"
         return await advance_or_finish(update, context)
 
-    await send_msg(update, "⚠️ Scelta non valida. Premi uno dei pulsanti o digita *Contanti* o *Satispay*.")
+    await send_msg(update, "⚠️ Scelta non valida. Premi uno dei pulsanti o digita <b>Contanti</b> o <b>Satispay</b>.")
     return STATE_METHOD
 
 
@@ -435,7 +469,7 @@ async def handle_box_before_input(update: Update, context: ContextTypes.DEFAULT_
         data["box_money"] = val
         return await advance_or_finish(update, context)
     except ValueError:
-        await send_msg(update, "⚠️ Inserisci una cifra numerica valida per la cassa (es: `50.00`).")
+        await send_msg(update, "⚠️ Inserisci una cifra numerica valida per la cassa (es: <code>50.00</code>).")
         return STATE_BOX_BEFORE
 
 
@@ -478,7 +512,7 @@ async def handle_flow_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         data["flow"] = "Uscita"
         return await advance_or_finish(update, context)
 
-    await send_msg(update, "⚠️ Scelta non valida. Premi *➕ Entrata* o *➖ Uscita*.")
+    await send_msg(update, "⚠️ Scelta non valida. Premi <b>➕ Entrata</b> o <b>➖ Uscita</b>.")
     return STATE_FLOW
 
 
@@ -498,7 +532,7 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         data["amount"] = val
         return await advance_or_finish(update, context)
     except ValueError:
-        await send_msg(update, "⚠️ Inserisci una cifra numerica valida per l'importo (es: `12.50`).")
+        await send_msg(update, "⚠️ Inserisci una cifra numerica valida per l'importo (es: <code>12.50</code>).")
         return STATE_AMOUNT
 
 
@@ -550,7 +584,7 @@ async def handle_receipt_input(update: Update, context: ContextTypes.DEFAULT_TYP
         data["receipt_number"] = int(text)
         return await advance_or_finish(update, context)
     else:
-        await send_msg(update, "⚠️ Inserisci un numero intero per la ricevuta (oppure `0` se assente).")
+        await send_msg(update, "⚠️ Inserisci un numero intero per la ricevuta (oppure <code>0</code> se assente).")
         return STATE_RECEIPT
 
 
@@ -579,7 +613,7 @@ async def handle_qr_ask_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await send_msg(
         update,
-        "⚠️ Scegli un'opzione: premi *📱 Genera QR Code* oppure *⏩ Salta e registra subito*.",
+        "⚠️ Scegli un'opzione: premi <b>📱 Genera QR Code</b> oppure <b>⏩ Salta e registra subito</b>.",
         reply_markup=get_qr_ask_keyboard()
     )
     return STATE_QR_ASK
@@ -599,13 +633,13 @@ async def start_qr_payment_flow(update: Update, context: ContextTypes.DEFAULT_TY
     receipt_str = str(receipt_num) if receipt_num and receipt_num > 0 else "-"
     desc = f"{base_desc} - {receipt_str}"
 
-    await send_msg(update, "⏳ _Contatto Satispay per generare il codice QR dinamico..._")
+    await send_msg(update, "⏳ <i>Contatto Satispay per generare il codice QR dinamico...</i>")
 
     payment_res = await satispay_service.create_payment(amount_unit, description=desc)
     if not payment_res or not payment_res.get("id"):
         await send_msg(
             update,
-            "⚠️ *Impossibile generare il QR Code Satispay.* Registro la transazione normalmente sul foglio...",
+            "⚠️ <b>Impossibile generare il QR Code Satispay.</b> Registro la transazione normalmente sul foglio...",
         )
         return await advance_or_finish(update, context)
 
@@ -618,17 +652,17 @@ async def start_qr_payment_flow(update: Update, context: ContextTypes.DEFAULT_TY
 
     caption = (
         f"{get_user_mention(update)}\n"
-        f"📲 *Inquadra con l'app Satispay per pagare {amount:.2f} €!*\n\n"
-        f"🆔 *ID Satispay:* `{payment_id}`\n"
-        f"⏳ _In attesa che il cliente autorizzi il pagamento sull'app..._\n\n"
-        f"💡 La transazione verrà registrata e collegata in automatico a pagamento avvenuto.\n"
-        f"Se ci sono problemi, puoi premere *⏩ Salta pagamento e registra*."
+        f"📲 <b>Inquadra con l'app Satispay per pagare {amount:.2f} €!</b>\n\n"
+        f"🆔 <b>ID Satispay:</b> <code>{html.escape(payment_id)}</code>\n"
+        "⏳ <i>In attesa che il cliente autorizzi il pagamento sull'app...</i>\n\n"
+        "💡 La transazione verrà registrata e collegata in automatico a pagamento avvenuto.\n"
+        "Se ci sono problemi, puoi premere <b>⏩ Salta pagamento e registra</b>."
     )
 
     await update.effective_chat.send_photo(
         photo=qr_buffer,
         caption=caption,
-        parse_mode="Markdown",
+        parse_mode="HTML",
         reply_markup=get_qr_waiting_keyboard()
     )
 
@@ -674,11 +708,11 @@ async def wait_for_qr_payment(
                 # Salva in SQLite per evitare duplicati col polling generale
                 db_service.save_payment(payment)
 
-                sender_str = f" da *{payment.sender_name}*" if payment.sender_name else ""
+                sender_str = f" da <b>{html.escape(payment.sender_name)}</b>" if payment.sender_name else ""
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"✅ *Pagamento Satispay di {amount:.2f} € ricevuto con successo{sender_str}!*",
-                    parse_mode="Markdown"
+                    text=f"✅ <b>Pagamento Satispay di {amount:.2f} € ricevuto con successo{sender_str}!</b>",
+                    parse_mode="HTML"
                 )
                 try:
                     await finalize_and_save_transaction(update, context)
@@ -689,8 +723,8 @@ async def wait_for_qr_payment(
                 logger.info(f"Pagamento QR Satispay {payment_id} terminato con esito: {payment.status}")
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"⚠️ *Il pagamento Satispay è risultato: {payment.status}.* Procedo con la registrazione della transazione sul foglio...",
-                    parse_mode="Markdown"
+                    text=f"⚠️ <b>Il pagamento Satispay è risultato: {html.escape(payment.status)}.</b> Procedo con la registrazione della transazione sul foglio...",
+                    parse_mode="HTML"
                 )
                 try:
                     await finalize_and_save_transaction(update, context)
@@ -704,8 +738,8 @@ async def wait_for_qr_payment(
     if not context.user_data.get("qr_cancelled") and not context.user_data.get("qr_skipped"):
         await context.bot.send_message(
             chat_id=chat_id,
-            text="⏳ *Tempo scaduto per il pagamento del QR Code.* Procedo con la registrazione sul foglio senza collegamento automatico...",
-            parse_mode="Markdown"
+            text="⏳ <b>Tempo scaduto per il pagamento del QR Code.</b> Procedo con la registrazione sul foglio senza collegamento automatico...",
+            parse_mode="HTML"
         )
         await finalize_and_save_transaction(update, context)
 
@@ -719,7 +753,7 @@ async def handle_qr_waiting_input(update: Update, context: ContextTypes.DEFAULT_
             return await handle_cancel(update, context)
         if query_data == CALLBACK_QR_SKIP:
             context.user_data["qr_skipped"] = True
-            await send_msg(update, "⏩ *Pagamento QR saltato.* Registro subito la transazione sul foglio...")
+            await send_msg(update, "⏩ <b>Pagamento QR saltato.</b> Registro subito la transazione sul foglio...")
             return await finalize_and_save_transaction(update, context)
 
     text = update.message.text.strip().lower() if update.message else ""
@@ -728,13 +762,13 @@ async def handle_qr_waiting_input(update: Update, context: ContextTypes.DEFAULT_
         return await handle_cancel(update, context)
     if "salta" in text or "skip" in text:
         context.user_data["qr_skipped"] = True
-        await send_msg(update, "⏩ *Pagamento QR saltato.* Registro subito la transazione sul foglio...")
+        await send_msg(update, "⏩ <b>Pagamento QR saltato.</b> Registro subito la transazione sul foglio...")
         return await finalize_and_save_transaction(update, context)
 
     await send_msg(
         update,
-        "⏳ *In attesa del pagamento tramite app Satispay...*\n"
-        "Premi *⏩ Salta pagamento e registra* per procedere subito o *❌ Annulla operazione* per terminare.",
+        "⏳ <b>In attesa del pagamento tramite app Satispay...</b>\n"
+        "Premi <b>⏩ Salta pagamento e registra</b> per procedere subito o <b>❌ Annulla operazione</b> per terminare.",
         reply_markup=get_qr_waiting_keyboard()
     )
     return STATE_QR_WAITING

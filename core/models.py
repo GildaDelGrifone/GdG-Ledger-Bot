@@ -1,6 +1,37 @@
 from datetime import datetime
 from typing import Optional, List, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def format_datetime_for_sheet(dt_val: Optional[str]) -> str:
+    """
+    Converte una data/ora in formato standard DD/MM/YYYY HH:MM:SS per Google Sheets.
+    Supporta conversioni da YYYY-MM-DD HH:MM:SS, YYYY-MM-DD HH:MM, ISO format, ecc.
+    """
+    if not dt_val:
+        return ""
+    val = dt_val.strip()
+
+    formats = [
+        "%d/%m/%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y %H:%M",
+        "%d/%m/%Y",
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+    ]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(val, fmt)
+            return dt.strftime("%d/%m/%Y %H:%M:%S")
+        except ValueError:
+            continue
+    return val
 
 
 class Transaction(BaseModel):
@@ -10,16 +41,25 @@ class Transaction(BaseModel):
     id: Optional[int] = None
     date_time: str
     method: str  # "Contanti" oppure "Satispay"
-    box_money: Optional[float] = None  # Cassa iniziale prima della transazione (solo contanti)
+    box_money: Optional[float] = None  # Cassa iniziale prima della transazione (o saldo confermato per Satispay)
     description: str
     flow: str  # "Entrata" oppure "Uscita"
     amount: float
-    box_money_updated: Optional[float] = None  # Cassa aggiornata (solo contanti)
+    box_money_updated: Optional[float] = None  # Cassa aggiornata (o saldo confermato per Satispay)
     receipt_number: int  # Numero progressivo ricevuta (0 se non applicabile)
     telegram_username: str
     telegram_user_id: int
     satispay_id: Optional[str] = None
-    created_at: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    created_at: str = Field(default_factory=lambda: datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
+
+    @field_validator("date_time", "created_at", mode="before")
+    @classmethod
+    def validate_datetimes(cls, v: Any) -> Any:
+        if isinstance(v, datetime):
+            return v.strftime("%d/%m/%Y %H:%M:%S")
+        if isinstance(v, str):
+            return format_datetime_for_sheet(v)
+        return v
 
     def to_sheet_row(self) -> List[Any]:
         """
@@ -27,7 +67,7 @@ class Transaction(BaseModel):
         """
         return [
             self.id if self.id is not None else "",
-            self.date_time,
+            format_datetime_for_sheet(self.date_time),
             self.method,
             f"{self.box_money:.2f}" if self.box_money is not None else "",
             self.description,
@@ -38,7 +78,7 @@ class Transaction(BaseModel):
             self.telegram_username,
             str(self.telegram_user_id),
             self.satispay_id or "",
-            self.created_at
+            format_datetime_for_sheet(self.created_at)
         ]
 
     @classmethod

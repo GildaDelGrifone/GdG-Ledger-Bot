@@ -40,6 +40,81 @@ def test_add_transaction_increments_id(mock_sheets: MockSheetsService, sample_tr
     assert res2.id == 2
     assert mock_sheets.get_last_transaction_id("Transazioni") == 2
 
+def test_satispay_transaction_box_columns(mock_sheets: MockSheetsService):
+    tx_satispay = Transaction(
+        date_time="08/10/2026 18:30:00",
+        method="Satispay",
+        box_money=65.50,
+        description="Quota socio",
+        flow="Entrata",
+        amount=20.0,
+        box_money_updated=65.50,
+        receipt_number=1,
+        telegram_username="giovanni_bianchi",
+        telegram_user_id=11223344
+    )
+    res = mock_sheets.add_transaction(tx_satispay, "Transazioni")
+    assert res.id is not None
+    row = mock_sheets._get_sheet_data("Transazioni")[1]
+    headers = mock_sheets._get_sheet_data("Transazioni")[0]
+
+    # Verify column headers correspond to index 3 and 7
+    assert headers[3] == "Cassa Iniziale (€)"
+    assert headers[7] == "Cassa Aggiornata (€)"
+
+    # Verify both columns have the exact confirmed value
+    assert row[3] == "65.50"
+    assert row[7] == "65.50"
+
+    # Also verify get_last_box_money returns this value as latest
+    assert mock_sheets.get_last_box_money("Transazioni") == 65.50
+
+
+def test_format_datetime_for_sheet_helper():
+    from core.models import format_datetime_for_sheet
+
+    assert format_datetime_for_sheet("2026-10-08 14:30:15") == "08/10/2026 14:30:15"
+    assert format_datetime_for_sheet("2026-10-08 14:30") == "08/10/2026 14:30:00"
+    assert format_datetime_for_sheet("2026-10-08") == "08/10/2026 00:00:00"
+    assert format_datetime_for_sheet("08/10/2026 14:30:15") == "08/10/2026 14:30:15"
+    assert format_datetime_for_sheet("08/10/2026 14:30") == "08/10/2026 14:30:00"
+    assert format_datetime_for_sheet("08/10/2026") == "08/10/2026 00:00:00"
+    assert format_datetime_for_sheet("2026-10-08T14:30:15Z") == "08/10/2026 14:30:15"
+    assert format_datetime_for_sheet("") == ""
+    assert format_datetime_for_sheet(None) == ""
+
+
+def test_transaction_date_format_saved_in_sheet(mock_sheets: MockSheetsService):
+    tx = Transaction(
+        date_time="2026-10-08 14:30:00",
+        method="Contanti",
+        box_money=100.0,
+        description="Test conversione data",
+        flow="Entrata",
+        amount=50.0,
+        box_money_updated=150.0,
+        receipt_number=10,
+        telegram_username="mario",
+        telegram_user_id=123,
+        created_at="2026-10-08 14:35:22"
+    )
+
+    # Both date_time and created_at must be formatted as DD/MM/YYYY HH:MM:SS
+    assert tx.date_time == "08/10/2026 14:30:00"
+    assert tx.created_at == "08/10/2026 14:35:22"
+
+    row = tx.to_sheet_row()
+    # Column B (index 1) is Data e Ora
+    assert row[1] == "08/10/2026 14:30:00"
+    # Column M (index 12) is Data Registrazione
+    assert row[12] == "08/10/2026 14:35:22"
+
+    saved = mock_sheets.add_transaction(tx, "Transazioni")
+    sheet_data = mock_sheets._get_sheet_data("Transazioni")[1]
+    assert sheet_data[1] == "08/10/2026 14:30:00"
+    assert sheet_data[12] == "08/10/2026 14:35:22"
+
+
 
 def test_get_last_box_money(mock_sheets: MockSheetsService, sample_transaction: Transaction):
     assert mock_sheets.get_last_box_money("Transazioni") == 0.0

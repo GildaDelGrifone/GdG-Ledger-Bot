@@ -64,7 +64,7 @@ async def send_satispay_echo(bot, payment: SatispayPayment):
         await bot.send_message(
             chat_id=chat_id,
             text=echo_text,
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         logger.info(f"Notifica Satispay {payment.id} ({payment.amount_euro:.2f}€) inviata alla chat {chat_id}")
     except Exception as e:

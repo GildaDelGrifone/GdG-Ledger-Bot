@@ -16,13 +16,21 @@ def test_is_chat_allowed():
 
 def test_extract_satispay_id_from_text():
     sample_text = (
+        "🔔 <b>Notifica Pagamento Satispay</b>\n\n"
+        "📥 <b>Ricevuto pagamento da:</b> Mario Rossi\n"
+        "💰 <b>Importo:</b> <code>+15.00 €</code>\n"
+        "🆔 <b>ID Satispay:</b> <code>e8f52f8d-69f2-4e89-9a74-954f9a0c71bd</code>\n"
+    )
+    extracted = extract_satispay_id_from_text(sample_text)
+    assert extracted == "e8f52f8d-69f2-4e89-9a74-954f9a0c71bd"
+
+    sample_old_markdown = (
         "🔔 *Notifica Pagamento Satispay*\n\n"
         "📥 *Ricevuto pagamento da:* Mario Rossi\n"
         "💰 *Importo:* `+15.00 €`\n"
         "🆔 *ID Satispay:* `e8f52f8d-69f2-4e89-9a74-954f9a0c71bd`\n"
     )
-    extracted = extract_satispay_id_from_text(sample_text)
-    assert extracted == "e8f52f8d-69f2-4e89-9a74-954f9a0c71bd"
+    assert extract_satispay_id_from_text(sample_old_markdown) == "e8f52f8d-69f2-4e89-9a74-954f9a0c71bd"
 
     sample_simple = "ID Satispay: sat_custom_123"
     extracted_simple = extract_satispay_id_from_text(sample_simple)
@@ -47,7 +55,9 @@ def test_format_satispay_echo():
     assert "sat-test-echo" in msg
     assert "+20.00 €" in msg
     assert "Paolo Neri" in msg
-    assert "/link <id_transazione>" in msg
+    assert "<b>Notifica Pagamento Satispay</b>" in msg
+    assert "/link" in msg
+    assert "&lt;id_transazione&gt;" in msg
 
 
 def test_db_service_date_and_range_filtering():
@@ -100,19 +110,26 @@ def test_get_user_mention():
     from unittest.mock import MagicMock
     from bot.conversation import get_user_mention
 
-    # Utente con username
+    # Utente con username (anche con underscore come @Big_Borzof)
     update_with_username = MagicMock()
-    update_with_username.effective_user.username = "mario_rossi"
-    update_with_username.effective_user.first_name = "Mario"
+    update_with_username.effective_user.username = "Big_Borzof"
+    update_with_username.effective_user.first_name = "Big"
     update_with_username.effective_user.id = 111
-    assert get_user_mention(update_with_username) == "👤 @mario_rossi"
+    assert get_user_mention(update_with_username) == "👤 @Big_Borzof"
 
-    # Utente senza username
+    # Utente senza username (link HTML)
     update_no_username = MagicMock()
     update_no_username.effective_user.username = None
     update_no_username.effective_user.first_name = "Luigi"
     update_no_username.effective_user.id = 222
-    assert get_user_mention(update_no_username) == "👤 [Luigi](tg://user?id=222)"
+    assert get_user_mention(update_no_username) == '👤 <a href="tg://user?id=222">Luigi</a>'
+
+    # Utente con caratteri speciali nel nome
+    update_special = MagicMock()
+    update_special.effective_user.username = None
+    update_special.effective_user.first_name = "Mario & Luigi <Brothers>"
+    update_special.effective_user.id = 333
+    assert get_user_mention(update_special) == '👤 <a href="tg://user?id=333">Mario &amp; Luigi &lt;Brothers&gt;</a>'
 
     # Nessun utente
     update_none = MagicMock()
@@ -132,6 +149,27 @@ def test_qr_keyboards():
     wait_callbacks = [btn.callback_data for row in wait_kb.inline_keyboard for btn in row]
     assert CALLBACK_QR_SKIP in wait_callbacks
 
+
+
+@pytest.mark.asyncio
+async def test_send_msg_with_underscore_username():
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.conversation import send_msg
+
+    update = MagicMock()
+    update.effective_user.username = "Big_Borzof"
+    update.effective_user.first_name = "Big"
+    update.effective_user.id = 123456
+    update.effective_chat.send_message = AsyncMock()
+    update.callback_query = None
+
+    await send_msg(update, "📅 <b>Data e Ora della transazione:</b>\nPremi il pulsante...", reply_markup=None)
+
+    update.effective_chat.send_message.assert_called_once()
+    call_kwargs = update.effective_chat.send_message.call_args.kwargs
+    assert call_kwargs["parse_mode"] == "HTML"
+    assert "👤 @Big_Borzof" in call_kwargs["text"]
+    assert "<b>Data e Ora della transazione:</b>" in call_kwargs["text"]
 
 
 @pytest.mark.asyncio
@@ -183,4 +221,60 @@ async def test_error_handler_unexpected_error(caplog):
 
     assert "Eccezione durante la gestione dell'aggiornamento:" in caplog.text
     assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+
+
+@pytest.mark.asyncio
+async def test_satispay_box_money_flow():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from telegram.ext import ConversationHandler
+    from bot.conversation import advance_or_finish, STATE_BOX_BEFORE
+    from services.sheets_service import MockSheetsService
+
+    mock_sheets = MockSheetsService()
+    mock_sheets.get_last_box_money = MagicMock(return_value=120.50)
+
+    with patch("bot.conversation.get_sheets_service", return_value=mock_sheets):
+        update = MagicMock()
+        update.effective_chat.send_message = AsyncMock()
+        update.callback_query = None
+        update.effective_user.username = "test_user"
+        update.effective_user.id = 123
+
+        context = MagicMock()
+        context.user_data = {
+            "tx_data": {
+                "date_time": "08/10/2026 18:00:00",
+                "method": "Satispay",
+            }
+        }
+
+        # Step 3: Should ask for box confirmation with Satispay specific message
+        next_state = await advance_or_finish(update, context)
+        assert next_state == STATE_BOX_BEFORE
+        sent_text = update.effective_chat.send_message.call_args.kwargs["text"]
+        assert "Conferma saldo cassa attuale" in sent_text
+        assert "120.50 €" in sent_text
+
+        # Now simulate user input for box_money (via button or text)
+        context.user_data["tx_data"]["box_money"] = 120.50
+        context.user_data["tx_data"]["description"] = "Test Satispay Spesa"
+        context.user_data["tx_data"]["flow"] = "Uscita"
+        context.user_data["tx_data"]["amount"] = 15.00
+        context.user_data["tx_data"]["receipt_number"] = 0
+
+        # Step 7 & Finalize: Satispay automatically copies box_money to box_money_updated
+        final_state = await advance_or_finish(update, context)
+        assert final_state == ConversationHandler.END
+
+        # Verify sheets row has Column D (index 3) and Column H (index 7) with 120.50
+        row = mock_sheets._get_sheet_data()[1]
+        assert row[3] == "120.50"  # Col D: Cassa Iniziale (€)
+        assert row[7] == "120.50"  # Col H: Cassa Aggiornata (€)
+
+        # Verify summary message contains confirmed cash
+        summary_call = update.effective_chat.send_message.call_args_list[-1]
+        summary_text = summary_call.kwargs["text"]
+        assert "Cassa attuale confermata" in summary_text
+        assert "120.50 €" in summary_text
 
