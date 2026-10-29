@@ -4,22 +4,25 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 import httpx
 from telegram import Update
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import ContextTypes
 from core.security import restricted
-from core.models import CustomCommandConfig, SatispayPayment
+from core.models import CustomCommandConfig, SatispayPayment, SumUpTransaction
 from services.sheets_service import get_sheets_service
 from services.db_service import db_service
 from services.satispay_service import satispay_service
+from services.sumup_service import sumup_service
 
 logger = logging.getLogger(__name__)
 
 SATISPAY_ID_REGEX = re.compile(
     r"(?:ID Satispay:\s*(?:<code>|`)?([a-zA-Z0-9_\-]+)(?:</code>|`)?)|(?:(?:<code>|`)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:</code>|`)?)"
 )
+
+SUMUP_ID_REGEX = re.compile(r"ID SumUp:\s*(?:<code>|`)?([A-Za-z0-9]+)(?:</code>|`)?")
 
 
 def format_satispay_echo(payment: SatispayPayment) -> str:
@@ -44,12 +47,57 @@ def format_satispay_echo(payment: SatispayPayment) -> str:
     )
 
 
+def format_sumup_echo(tx: SumUpTransaction) -> str:
+    """Formatta il messaggio di notifica SumUp identico per polling e rievocazione /sumup_get"""
+    is_refund = (tx.type or "").upper() == "REFUND"
+    flow_text = "Rimborso" if is_refund else "Ricevuto pagamento"
+    amount_sign = "-" if is_refund else "+"
+    card = html.escape(" ".join(filter(None, [tx.card_type, tx.payment_type])) or "N/D")
+
+    return (
+        "🔔 <b>Notifica Pagamento SumUp</b>\n\n"
+        f"📥 <b>{flow_text}</b>\n"
+        f"💰 <b>Importo:</b> <code>{amount_sign}{tx.amount_euro:.2f} €</code>\n"
+        f"💳 <b>Carta/Tipo:</b> {card}\n"
+        f"🆔 <b>ID SumUp:</b> <code>{html.escape(tx.transaction_code)}</code>\n"
+        f"⏰ <b>Data:</b> {html.escape(tx.timestamp or 'Adesso')}\n\n"
+        "💡 <b>Per associare questa transazione a una riga del registro, "
+        "rispondi a questo messaggio con:</b>\n<code>/link &lt;id_transazione&gt;</code>"
+    )
+
+
+def extract_payment_ref(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Estrae (provider, id) dal messaggio a cui si risponde: 'sumup', 'satispay' oppure (None, None)"""
+    match = SUMUP_ID_REGEX.search(text)
+    if match:
+        return "sumup", match.group(1)
+    sat_id = extract_satispay_id_from_text(text)
+    if sat_id:
+        return "satispay", sat_id
+    return None, None
+
+
 def extract_satispay_id_from_text(text: str) -> Optional[str]:
     """Estrae l'ID transazione Satispay dal testo del messaggio a cui si risponde"""
     match = SATISPAY_ID_REGEX.search(text)
     if match:
         return match.group(1) or match.group(2)
     return None
+
+
+@restricted
+async def cassa_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra gli ultimi saldi registrati di Cassa Rossa e Cassa Blu"""
+    sheets = get_sheets_service()
+    red, blue = await asyncio.to_thread(sheets.get_last_box_balances)
+    await update.effective_chat.send_message(
+        "🪙 <b>Saldi attuali delle casse</b>\n\n"
+        f"🔴 <b>Cassa Rossa:</b> <code>{red:.2f} €</code>\n"
+        f"🔵 <b>Cassa Blu:</b> <code>{blue:.2f} €</code>\n"
+        f"💰 <b>Totale contanti:</b> <code>{red + blue:.2f} €</code>\n\n"
+        "💡 Per spostare contanti tra le casse usa <code>/transfer</code>.",
+        parse_mode="HTML",
+    )
 
 
 @restricted
@@ -62,6 +110,8 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 <b>Comandi principali:</b>\n"
         "• <code>/write</code> (o <code>/w</code>) - Avvia la procedura guidata di inserimento transazione\n"
         "• <code>/help</code> - Mostra la guida completa e i comandi personalizzati disponibili\n"
+        "• <code>/transfer</code> (o <code>/tr</code>) - Sposta contanti tra Cassa Rossa e Cassa Blu\n"
+        "• <code>/cassa</code> - Mostra i saldi di Cassa Rossa e Cassa Blu\n"
         "• <code>/cancel</code> - Annulla un inserimento in corso\n"
     )
     await update.effective_chat.send_message(welcome_text, parse_mode="HTML")
@@ -83,9 +133,14 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 <b>Guida all'uso del Ledger Bot</b>\n\n"
         "🔹 <b>Registrazione Transazioni:</b>\n"
         "Usa il comando <code>/write</code> (scorciatoia <code>/w</code>) per avviare una procedura interattiva.\n"
-        "Il bot ti guiderà passo dopo passo ponendo domande su data, metodo (Contanti o Satispay), "
-        "saldo cassa, descrizione, flusso (entrata/uscita), importo e ricevuta.\n"
+        "Il bot ti guiderà passo dopo passo ponendo domande su data, metodo (Contanti, Satispay o SumUp), "
+        "saldi delle casse, descrizione, flusso (entrata/uscita), importo e ricevuta.\n"
+        "Per le entrate con Satispay o SumUp il bot può attendere il pagamento e collegarlo in automatico.\n"
         f"{custom_text}\n"
+        "🔹 <b>Doppia cassa (🔴 Rossa / 🔵 Blu):</b>\n"
+        "Il contante è diviso in Cassa Rossa (principale) e Cassa Blu (resto). Le transazioni in contanti usano la Cassa Blu.\n"
+        "• <code>/cassa</code> (o <code>/saldo</code>): Mostra i saldi attuali delle due casse.\n"
+        "• <code>/transfer</code> (o <code>/tr</code>): Sposta contanti da Blu a Rossa o da Rossa a Blu.\n\n"
         "🔹 <b>Integrazione Satispay &amp; Collegamento:</b>\n"
         "Il bot controlla periodicamente i pagamenti Satispay e invia una notifica in chat.\n"
         "• <code>/link &lt;id_transazione&gt;</code>: Rispondi al messaggio Satispay per associare quell'ID alla riga nel foglio.\n"
@@ -94,7 +149,12 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 <b>Storico Satispay:</b>\n"
         "• <code>/sat_list [data]</code>: Mostra le transazioni Satispay della data (es: <code>/sat_list 30/09/2026</code> o oggi se omessa).\n"
         "• <code>/sat_list_range &lt;da&gt; &lt;a&gt;</code>: Mostra le transazioni in un intervallo (es: <code>/sat_list_range 01/09/2026 30/09/2026</code>).\n"
-        "• <code>/sat_get &lt;ID_Satispay&gt;</code>: Richiama la notifica di un pagamento per poter usare <code>/link</code> in qualsiasi momento.\n"
+        "• <code>/sat_get &lt;ID_Satispay&gt;</code>: Richiama la notifica di un pagamento per poter usare <code>/link</code> in qualsiasi momento.\n\n"
+        "🔹 <b>Integrazione SumUp:</b>\n"
+        "Le transazioni SumUp vengono notificate in chat; <code>/link</code> e <code>/unlink</code> funzionano allo stesso modo (colonna <i>ID SumUp</i>).\n"
+        "• <code>/sumup_list [data]</code> (<code>/sul</code>): Transazioni SumUp della data (o di oggi).\n"
+        "• <code>/sumup_list_range &lt;da&gt; &lt;a&gt;</code> (<code>/sulr</code>): Transazioni in un intervallo.\n"
+        "• <code>/sumup_get &lt;codice&gt;</code> (<code>/sug</code>): Richiama la notifica di una transazione.\n"
     )
     await update.effective_chat.send_message(help_text, parse_mode="HTML")
 @restricted
@@ -112,10 +172,10 @@ async def link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    satispay_id = extract_satispay_id_from_text(reply_to.text)
+    provider, satispay_id = extract_payment_ref(reply_to.text)
     if not satispay_id:
         await update.effective_chat.send_message(
-            "❌ Impossibile rilevare un ID Satispay nel messaggio a cui hai risposto. "
+            "❌ Impossibile rilevare un ID di pagamento (Satispay o SumUp) nel messaggio a cui hai risposto. "
             "Assicurati di rispondere alla notifica di pagamento inviata dal bot.",
             parse_mode="HTML",
         )
@@ -132,13 +192,15 @@ async def link_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     username = user.username or user.first_name if user else "Anonimo"
     user_id = user.id if user else 0
-    logger.info(f"Utente @{username} (ID: {user_id}) ha richiesto collegamento transazione #{tx_id} a Satispay ID: {satispay_id}")
+    logger.info(f"Utente @{username} (ID: {user_id}) ha richiesto collegamento transazione #{tx_id} a {provider} ID: {satispay_id}")
     sheets = get_sheets_service()
 
-    success = await asyncio.to_thread(sheets.link_satispay_id, tx_id, satispay_id)
+    link_fn = sheets.link_sumup_id if provider == "sumup" else sheets.link_satispay_id
+    provider_name = "SumUp" if provider == "sumup" else "Satispay"
+    success = await asyncio.to_thread(link_fn, tx_id, satispay_id)
     if success:
         await update.effective_chat.send_message(
-            f"✅ Transazione <code>#{tx_id}</code> collegata con successo all'ID Satispay:\n<code>{html.escape(satispay_id)}</code>",
+            f"✅ Transazione <code>#{tx_id}</code> collegata con successo all'ID {provider_name}:\n<code>{html.escape(satispay_id)}</code>",
             parse_mode="HTML",
         )
     else:
@@ -163,10 +225,10 @@ async def unlink_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    satispay_id = extract_satispay_id_from_text(reply_to.text)
+    provider, satispay_id = extract_payment_ref(reply_to.text)
     if not satispay_id:
         await update.effective_chat.send_message(
-            "❌ Impossibile rilevare un ID Satispay nel messaggio a cui hai risposto.",
+            "❌ Impossibile rilevare un ID di pagamento (Satispay o SumUp) nel messaggio a cui hai risposto.",
             parse_mode="HTML",
         )
         return
@@ -182,17 +244,19 @@ async def unlink_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Utente @{username} (ID: {user_id}) ha richiesto scollegamento Satispay ID: {satispay_id} da {target_descr}")
 
     sheets = get_sheets_service()
-    count = await asyncio.to_thread(sheets.unlink_satispay_id, satispay_id, transaction_id=tx_id)
+    unlink_fn = sheets.unlink_sumup_id if provider == "sumup" else sheets.unlink_satispay_id
+    provider_name = "SumUp" if provider == "sumup" else "Satispay"
+    count = await asyncio.to_thread(unlink_fn, satispay_id, transaction_id=tx_id)
 
     if count > 0:
         target_str = f"dalla transazione #{tx_id}" if tx_id is not None else "da tutte le transazioni collegate"
         await update.effective_chat.send_message(
-            f"✅ ID Satispay <code>{html.escape(satispay_id)}</code> scollegato con successo {target_str} (righe aggiornate: {count}).",
+            f"✅ ID {provider_name} <code>{html.escape(satispay_id)}</code> scollegato con successo {target_str} (righe aggiornate: {count}).",
             parse_mode="HTML",
         )
     else:
         await update.effective_chat.send_message(
-            f"ℹ️ Nessuna corrispondenza trovata nel foglio per l'ID Satispay <code>{html.escape(satispay_id)}</code>.",
+            f"ℹ️ Nessuna corrispondenza trovata nel foglio per l'ID {provider_name} <code>{html.escape(satispay_id)}</code>.",
             parse_mode="HTML",
         )
 
@@ -331,6 +395,107 @@ async def sat_get_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     echo_msg = format_satispay_echo(payment)
     await update.effective_chat.send_message(echo_msg, parse_mode="HTML")
 
+
+def _format_sumup_line(idx: int, t: SumUpTransaction) -> str:
+    sign = "-" if (t.type or "").upper() == "REFUND" else "+"
+    ts = (t.timestamp or "")[:16].replace("T", " ")
+    status = "" if t.status == "SUCCESSFUL" else f" ({html.escape(t.status)})"
+    return (
+        f"{idx}. <code>{html.escape(t.transaction_code)}</code>\n"
+        f"   💰 <b>{sign}{t.amount_euro:.2f} €</b>{status} | 📅 {ts}\n"
+    )
+
+
+@restricted
+async def sumup_list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Mostra le transazioni SumUp di una data (o di oggi se omessa).
+    Uso: /sumup_list [GG/MM/AAAA]
+    """
+    has_arg = bool(context.args)
+    date_arg = context.args[0] if has_arg else datetime.now().strftime("%d/%m/%Y")
+    txs = db_service.get_sumup_by_date(date_arg)
+
+    if not txs:
+        recent = db_service.get_recent_sumup(limit=5)
+        if not recent:
+            await update.effective_chat.send_message(
+                "ℹ️ Il database locale SumUp è attualmente vuoto (nessuna transazione rilevata).",
+                parse_mode="HTML",
+            )
+            return
+        lines = [
+            f"ℹ️ Nessuna transazione SumUp per <code>{html.escape(date_arg)}</code>.\n",
+            "📋 <b>Ultime transazioni nel database:</b>\n",
+        ]
+        lines += [_format_sumup_line(i, t) for i, t in enumerate(recent, start=1)]
+        lines.append("💡 <code>/sumup_list &lt;GG/MM/AAAA&gt;</code> · <code>/sumup_get &lt;codice&gt;</code>")
+        await update.effective_chat.send_message("\n".join(lines), parse_mode="HTML")
+        return
+
+    lines = [f"📋 <b>Transazioni SumUp del {html.escape(date_arg)} ({len(txs)} trovate):</b>\n"]
+    lines += [_format_sumup_line(i, t) for i, t in enumerate(txs, start=1)]
+    lines.append("💡 <b>Per richiamare la notifica e collegarla con /link:</b> <code>/sumup_get &lt;codice&gt;</code>")
+    await update.effective_chat.send_message("\n".join(lines), parse_mode="HTML")
+
+
+@restricted
+async def sumup_list_range_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Mostra le transazioni SumUp in un intervallo di date.
+    Uso: /sumup_list_range <data_inizio> <data_fine>
+    """
+    if not context.args or len(context.args) < 2:
+        await update.effective_chat.send_message(
+            "⚠️ <b>Uso del comando:</b> <code>/sumup_list_range &lt;data_inizio&gt; &lt;data_fine&gt;</code>\n"
+            "Esempio: <code>/sumup_list_range 01/09/2026 30/09/2026</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    start_date, end_date = context.args[0], context.args[1]
+    txs = db_service.get_sumup_by_range(start_date, end_date)
+    if not txs:
+        await update.effective_chat.send_message(
+            f"ℹ️ Nessuna transazione SumUp tra <code>{html.escape(start_date)}</code> e <code>{html.escape(end_date)}</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    lines = [f"📋 <b>Transazioni SumUp dal {html.escape(start_date)} al {html.escape(end_date)} ({len(txs)} trovate):</b>\n"]
+    lines += [_format_sumup_line(i, t) for i, t in enumerate(txs[:50], start=1)]
+    if len(txs) > 50:
+        lines.append(f"<i>...e altre {len(txs) - 50} transazioni. Riduci l'intervallo per vederle tutte.</i>\n")
+    lines.append("💡 <b>Per richiamare la notifica e collegarla con /link:</b> <code>/sumup_get &lt;codice&gt;</code>")
+    await update.effective_chat.send_message("\n".join(lines), parse_mode="HTML")
+
+
+@restricted
+async def sumup_get_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Rievoca la notifica di una transazione SumUp dato il suo codice.
+    Uso: /sumup_get <codice>
+    """
+    if not context.args:
+        await update.effective_chat.send_message(
+            "⚠️ <b>Uso del comando:</b> <code>/sumup_get &lt;codice_transazione&gt;</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    code = context.args[0].strip("`").strip()
+    tx = db_service.get_sumup_by_code(code)
+    if not tx:
+        tx = await sumup_service.get_transaction(code)
+
+    if not tx:
+        await update.effective_chat.send_message(
+            f"❌ Nessuna transazione SumUp trovata con codice:\n<code>{html.escape(code)}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    await update.effective_chat.send_message(format_sumup_echo(tx), parse_mode="HTML")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):

@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from config import settings
-from core.models import SatispayPayment
+from core.models import SatispayPayment, SumUpTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,21 @@ class DatabaseService:
                     sender_name TEXT,
                     comment TEXT,
                     insert_date TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sumup_transactions (
+                    transaction_code TEXT PRIMARY KEY,
+                    id TEXT,
+                    amount REAL NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'EUR',
+                    status TEXT NOT NULL,
+                    type TEXT,
+                    payment_type TEXT,
+                    card_type TEXT,
+                    user TEXT,
+                    timestamp TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -160,6 +175,105 @@ class DatabaseService:
             """, (start_norm, end_norm, start_norm, end_norm))
             rows = cursor.fetchall()
             return [self._row_to_model(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # SumUp
+    # ------------------------------------------------------------------
+    def sumup_is_empty(self) -> bool:
+        """Verifica se non è stata salvata alcuna transazione SumUp"""
+        with self._get_connection() as conn:
+            return conn.execute("SELECT COUNT(*) FROM sumup_transactions;").fetchone()[0] == 0
+
+    def has_sumup_transaction(self, transaction_code: str) -> bool:
+        """Verifica se una transazione SumUp è già presente nel DB"""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT 1 FROM sumup_transactions WHERE transaction_code = ?;", (transaction_code,)
+            )
+            return cursor.fetchone() is not None
+
+    def save_sumup_transaction(self, tx: SumUpTransaction) -> bool:
+        """Salva una transazione SumUp se non già presente. Restituisce True se inserita"""
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                INSERT OR IGNORE INTO sumup_transactions
+                (transaction_code, id, amount, currency, status, type, payment_type, card_type, user, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (
+                tx.transaction_code,
+                tx.id,
+                tx.amount,
+                tx.currency,
+                tx.status,
+                tx.type,
+                tx.payment_type,
+                tx.card_type,
+                tx.user,
+                tx.timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ))
+            conn.commit()
+            inserted = cursor.rowcount > 0
+            if inserted:
+                logger.info(f"[SQLite] Salvata transazione SumUp: {tx.transaction_code} ({tx.amount:.2f}€)")
+            return inserted
+
+    def get_sumup_by_code(self, transaction_code: str) -> Optional[SumUpTransaction]:
+        """Recupera una transazione SumUp dato il suo transaction_code"""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM sumup_transactions WHERE transaction_code = ?;", (transaction_code,)
+            ).fetchone()
+            return self._sumup_row_to_model(row) if row else None
+
+    def get_recent_sumup(self, limit: int = 10) -> List[SumUpTransaction]:
+        """Ultime N transazioni SumUp (dalla più recente)"""
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT * FROM sumup_transactions
+                ORDER BY datetime(timestamp) DESC, created_at DESC
+                LIMIT ?;
+            """, (limit,)).fetchall()
+            return [self._sumup_row_to_model(r) for r in rows]
+
+    def get_sumup_by_date(self, date_str: str) -> List[SumUpTransaction]:
+        """Transazioni SumUp di una data (DD/MM/YYYY o YYYY-MM-DD)"""
+        norm_date = self._parse_input_date(date_str)
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT * FROM sumup_transactions
+                WHERE date(timestamp, 'localtime') = ?
+                   OR timestamp LIKE ?
+                ORDER BY datetime(timestamp) ASC, created_at ASC;
+            """, (norm_date, f"{norm_date}%")).fetchall()
+            return [self._sumup_row_to_model(r) for r in rows]
+
+    def get_sumup_by_range(self, start_date_str: str, end_date_str: str) -> List[SumUpTransaction]:
+        """Transazioni SumUp in un intervallo di date (inclusivo)"""
+        start_norm = self._parse_input_date(start_date_str)
+        end_norm = self._parse_input_date(end_date_str)
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT * FROM sumup_transactions
+                WHERE (date(timestamp, 'localtime') BETWEEN ? AND ?)
+                   OR (substr(timestamp, 1, 10) BETWEEN ? AND ?)
+                ORDER BY datetime(timestamp) ASC, created_at ASC;
+            """, (start_norm, end_norm, start_norm, end_norm)).fetchall()
+            return [self._sumup_row_to_model(r) for r in rows]
+
+    @staticmethod
+    def _sumup_row_to_model(row: sqlite3.Row) -> SumUpTransaction:
+        return SumUpTransaction(
+            id=row["id"],
+            transaction_code=row["transaction_code"],
+            amount=row["amount"],
+            currency=row["currency"],
+            status=row["status"],
+            type=row["type"],
+            payment_type=row["payment_type"],
+            card_type=row["card_type"],
+            user=row["user"],
+            timestamp=row["timestamp"],
+        )
 
     def _row_to_model(self, row: sqlite3.Row) -> SatispayPayment:
         return SatispayPayment(

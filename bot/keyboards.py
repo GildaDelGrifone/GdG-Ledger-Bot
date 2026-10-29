@@ -4,6 +4,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 CALLBACK_NOW = "action:now"
 CALLBACK_METHOD_CASH = "method:cash"
 CALLBACK_METHOD_SATISPAY = "method:satispay"
+CALLBACK_METHOD_SUMUP = "method:sumup"
 CALLBACK_FLOW_IN = "flow:in"
 CALLBACK_FLOW_OUT = "flow:out"
 CALLBACK_BOX_USE_LAST = "box:use_last"
@@ -13,6 +14,10 @@ CALLBACK_RECEIPT_NONE = "receipt:none"
 CALLBACK_CANCEL = "action:cancel"
 CALLBACK_QR_GENERATE = "qr:generate"
 CALLBACK_QR_SKIP = "qr:skip"
+CALLBACK_SUMUP_TERMINAL = "sumup:terminal"
+CALLBACK_SUMUP_LINK = "sumup:link"
+CALLBACK_TRANSFER_BLUE_TO_RED = "transfer:blue_to_red"
+CALLBACK_TRANSFER_RED_TO_BLUE = "transfer:red_to_blue"
 
 
 
@@ -26,21 +31,22 @@ def get_now_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_method_keyboard() -> InlineKeyboardMarkup:
-    """Tastiera per selezionare Contanti o Satispay"""
+    """Tastiera per selezionare Contanti, Satispay o SumUp"""
     buttons = [
         [
             InlineKeyboardButton("💵 Contanti", callback_data=CALLBACK_METHOD_CASH),
-            InlineKeyboardButton("📱 Satispay", callback_data=CALLBACK_METHOD_SATISPAY)
+            InlineKeyboardButton("📱 Satispay", callback_data=CALLBACK_METHOD_SATISPAY),
+            InlineKeyboardButton("💳 SumUp", callback_data=CALLBACK_METHOD_SUMUP)
         ],
         [InlineKeyboardButton("❌ Annulla", callback_data=CALLBACK_CANCEL)]
     ]
     return InlineKeyboardMarkup(buttons)
 
 
-def get_box_money_keyboard(last_box_money: float) -> InlineKeyboardMarkup:
-    """Tastiera per confermare l'ultimo saldo cassa rilevato"""
+def get_box_balances_keyboard(red: float, blue: float) -> InlineKeyboardMarkup:
+    """Tastiera per confermare gli ultimi saldi rilevati di Cassa Rossa e Cassa Blu"""
     buttons = [
-        [InlineKeyboardButton(f"✅ Usa saldo attuale ({last_box_money:.2f} €)", callback_data=CALLBACK_BOX_USE_LAST)],
+        [InlineKeyboardButton(f"✅ Conferma saldi (🔴 {red:.2f} € · 🔵 {blue:.2f} €)", callback_data=CALLBACK_BOX_USE_LAST)],
         [InlineKeyboardButton("❌ Annulla", callback_data=CALLBACK_CANCEL)]
     ]
     return InlineKeyboardMarkup(buttons)
@@ -103,3 +109,23 @@ def get_qr_waiting_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(buttons)
 
+
+
+def get_sumup_ask_keyboard(qr_enabled: bool = True) -> InlineKeyboardMarkup:
+    """Tastiera per scegliere come incassare con SumUp (terminale o link/QR se abilitato)"""
+    buttons = [[InlineKeyboardButton("💳 Attendi pagamento su terminale", callback_data=CALLBACK_SUMUP_TERMINAL)]]
+    if qr_enabled:
+        buttons.append([InlineKeyboardButton("🔗 Genera QR link di pagamento", callback_data=CALLBACK_SUMUP_LINK)])
+    buttons.append([InlineKeyboardButton("⏩ Salta e registra subito", callback_data=CALLBACK_QR_SKIP)])
+    buttons.append([InlineKeyboardButton("❌ Annulla operazione", callback_data=CALLBACK_CANCEL)])
+    return InlineKeyboardMarkup(buttons)
+
+
+def get_transfer_direction_keyboard() -> InlineKeyboardMarkup:
+    """Tastiera per scegliere la direzione del trasferimento tra le casse"""
+    buttons = [
+        [InlineKeyboardButton("🔵 Blu → 🔴 Rossa", callback_data=CALLBACK_TRANSFER_BLUE_TO_RED)],
+        [InlineKeyboardButton("🔴 Rossa → 🔵 Blu", callback_data=CALLBACK_TRANSFER_RED_TO_BLUE)],
+        [InlineKeyboardButton("❌ Annulla", callback_data=CALLBACK_CANCEL)]
+    ]
+    return InlineKeyboardMarkup(buttons)

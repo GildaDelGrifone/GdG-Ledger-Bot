@@ -7,6 +7,40 @@ from core.models import Transaction
 
 logger = logging.getLogger(__name__)
 
+# Indici (0-based) delle colonne del foglio
+COL_RED_AFTER = 8
+COL_BLUE_AFTER = 9
+COL_RECEIPT = 10
+SATISPAY_COLUMN_INDEX = 13
+SUMUP_COLUMN_INDEX = 15
+
+OLD_LAYOUT_BOX_HEADER = "Cassa Iniziale (€)"
+
+
+def _parse_money(cell: Any) -> Optional[float]:
+    """Converte il contenuto di una cella in float (None se vuota o non numerica)"""
+    cleaned = str(cell).replace("€", "").replace(",", ".").strip()
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _last_box_balances(rows: List[List[Any]]) -> Tuple[float, float]:
+    """Ultimi saldi noti (Rossa, Blu) cercando dal fondo, ciascuno in modo indipendente"""
+    red: Optional[float] = None
+    blue: Optional[float] = None
+    for row in reversed(rows):
+        if red is None and len(row) > COL_RED_AFTER:
+            red = _parse_money(row[COL_RED_AFTER])
+        if blue is None and len(row) > COL_BLUE_AFTER:
+            blue = _parse_money(row[COL_BLUE_AFTER])
+        if red is not None and blue is not None:
+            break
+    return (red or 0.0, blue or 0.0)
+
 
 class SheetsServiceInterface(ABC):
     """
@@ -22,7 +56,7 @@ class SheetsServiceInterface(ABC):
         pass
 
     @abstractmethod
-    def get_last_box_money(self, worksheet_name: Optional[str] = None) -> float:
+    def get_last_box_balances(self, worksheet_name: Optional[str] = None) -> Tuple[float, float]:
         pass
 
     @abstractmethod
@@ -45,6 +79,33 @@ class SheetsServiceInterface(ABC):
         worksheet_name: Optional[str] = None
     ) -> int:
         pass
+
+    @abstractmethod
+    def link_payment_id(
+        self, transaction_id: int, payment_id: str, column_index: int, worksheet_name: Optional[str] = None
+    ) -> bool:
+        pass
+
+    @abstractmethod
+    def unlink_payment_id(
+        self,
+        payment_id: str,
+        column_index: int,
+        transaction_id: Optional[int] = None,
+        worksheet_name: Optional[str] = None
+    ) -> int:
+        pass
+
+    def link_sumup_id(self, transaction_id: int, sumup_id: str, worksheet_name: Optional[str] = None) -> bool:
+        return self.link_payment_id(transaction_id, sumup_id, SUMUP_COLUMN_INDEX, worksheet_name)
+
+    def unlink_sumup_id(
+        self,
+        sumup_id: str,
+        transaction_id: Optional[int] = None,
+        worksheet_name: Optional[str] = None
+    ) -> int:
+        return self.unlink_payment_id(sumup_id, SUMUP_COLUMN_INDEX, transaction_id, worksheet_name)
 
     @abstractmethod
     def get_transaction_by_id(self, transaction_id: int, worksheet_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -79,24 +140,15 @@ class MockSheetsService(SheetsServiceInterface):
                     last_id = val
         return last_id
 
-    def get_last_box_money(self, worksheet_name: Optional[str] = None) -> float:
-        rows = self._get_sheet_data(worksheet_name)[1:]
-        for row in reversed(rows):
-            if len(row) > 7 and row[7]:
-                try:
-                    cleaned = str(row[7]).replace("€", "").replace(",", ".").strip()
-                    if cleaned:
-                        return float(cleaned)
-                except ValueError:
-                    continue
-        return 0.0
+    def get_last_box_balances(self, worksheet_name: Optional[str] = None) -> Tuple[float, float]:
+        return _last_box_balances(self._get_sheet_data(worksheet_name)[1:])
 
     def get_last_receipt_number(self, worksheet_name: Optional[str] = None) -> int:
         rows = self._get_sheet_data(worksheet_name)[1:]
         last_receipt = 0
         for row in rows:
-            if len(row) > 8 and str(row[8]).strip().isdigit():
-                val = int(row[8])
+            if len(row) > COL_RECEIPT and str(row[COL_RECEIPT]).strip().isdigit():
+                val = int(row[COL_RECEIPT])
                 if val > last_receipt:
                     last_receipt = val
         return last_receipt
@@ -115,24 +167,27 @@ class MockSheetsService(SheetsServiceInterface):
         )
         return transaction
 
-    def link_satispay_id(self, transaction_id: int, satispay_id: str, worksheet_name: Optional[str] = None) -> bool:
+    def link_payment_id(
+        self, transaction_id: int, payment_id: str, column_index: int, worksheet_name: Optional[str] = None
+    ) -> bool:
         name = worksheet_name or settings.GOOGLE_WORKSHEET_NAME
         sheet = self._get_sheet_data(name)
         for row in sheet[1:]:
             if len(row) > 0 and str(row[0]).strip() == str(transaction_id):
-                while len(row) <= 11:
+                while len(row) <= column_index:
                     row.append("")
-                row[11] = satispay_id
+                row[column_index] = payment_id
                 logger.info(
                     f"[MockSheets] Scrittura su foglio '{name}': "
-                    f"Collegato Satispay ID '{satispay_id}' alla transazione #{transaction_id}"
+                    f"Collegato ID pagamento '{payment_id}' alla transazione #{transaction_id}"
                 )
                 return True
         return False
 
-    def unlink_satispay_id(
+    def unlink_payment_id(
         self,
-        satispay_id: str,
+        payment_id: str,
+        column_index: int,
         transaction_id: Optional[int] = None,
         worksheet_name: Optional[str] = None
     ) -> int:
@@ -140,16 +195,27 @@ class MockSheetsService(SheetsServiceInterface):
         sheet = self._get_sheet_data(name)
         unlinked_count = 0
         for row in sheet[1:]:
-            if len(row) > 11 and row[11] == satispay_id:
+            if len(row) > column_index and row[column_index] == payment_id:
                 if transaction_id is None or str(row[0]).strip() == str(transaction_id):
-                    row[11] = ""
+                    row[column_index] = ""
                     unlinked_count += 1
         target_info = f"dalla transazione #{transaction_id}" if transaction_id is not None else "da tutte le transazioni collegate"
         logger.info(
             f"[MockSheets] Scrittura su foglio '{name}': "
-            f"Scollegato Satispay ID '{satispay_id}' {target_info} (righe aggiornate: {unlinked_count})"
+            f"Scollegato ID pagamento '{payment_id}' {target_info} (righe aggiornate: {unlinked_count})"
         )
         return unlinked_count
+
+    def link_satispay_id(self, transaction_id: int, satispay_id: str, worksheet_name: Optional[str] = None) -> bool:
+        return self.link_payment_id(transaction_id, satispay_id, SATISPAY_COLUMN_INDEX, worksheet_name)
+
+    def unlink_satispay_id(
+        self,
+        satispay_id: str,
+        transaction_id: Optional[int] = None,
+        worksheet_name: Optional[str] = None
+    ) -> int:
+        return self.unlink_payment_id(satispay_id, SATISPAY_COLUMN_INDEX, transaction_id, worksheet_name)
 
     def get_transaction_by_id(self, transaction_id: int, worksheet_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
         sheet = self._get_sheet_data(worksheet_name)
@@ -248,6 +314,24 @@ class GoogleSheetsService(SheetsServiceInterface):
             ws.insert_row(headers, 1)
             self._invalidate_cache(name)
             logger.info(f"Intestazioni inserite nel foglio '{ws.title}'")
+        else:
+            if len(rows[0]) > 3 and rows[0][3] == OLD_LAYOUT_BOX_HEADER:
+                self._migrate_to_two_boxes(ws, name)
+                rows = self._get_rows(name, force_refresh=True)
+            if len(rows[0]) <= SUMUP_COLUMN_INDEX or rows[0][SUMUP_COLUMN_INDEX] != "ID SumUp":
+                ws.update_cell(1, SUMUP_COLUMN_INDEX + 1, "ID SumUp")
+                self._invalidate_cache(name)
+                logger.info(f"Colonna 'ID SumUp' aggiunta al foglio '{ws.title}'")
+
+    def _migrate_to_two_boxes(self, ws, name: str) -> None:
+        """Migra il vecchio layout (cassa unica in D/H) al nuovo con Cassa Rossa e Cassa Blu"""
+        logger.warning(f"[GoogleSheets] Migrazione del foglio '{ws.title}' al layout con doppia cassa (Rossa/Blu)...")
+        ws.insert_cols([["Cassa Blu Iniziale (€)"]], col=5)
+        ws.insert_cols([["Cassa Blu Aggiornata (€)"]], col=10)
+        ws.update_cell(1, 4, "Cassa Rossa Iniziale (€)")
+        ws.update_cell(1, 9, "Cassa Rossa Aggiornata (€)")
+        self._invalidate_cache(name)
+        logger.warning("[GoogleSheets] Migrazione completata: i vecchi saldi sono nella Cassa Rossa, la Blu parte da vuoto.")
 
     def get_last_transaction_id(self, worksheet_name: Optional[str] = None) -> int:
         rows = self._get_rows(worksheet_name)[1:]
@@ -259,24 +343,15 @@ class GoogleSheetsService(SheetsServiceInterface):
                     last_id = val
         return last_id
 
-    def get_last_box_money(self, worksheet_name: Optional[str] = None) -> float:
-        rows = self._get_rows(worksheet_name)[1:]
-        for row in reversed(rows):
-            if len(row) > 7 and row[7]:
-                try:
-                    cleaned = str(row[7]).replace("€", "").replace(",", ".").strip()
-                    if cleaned:
-                        return float(cleaned)
-                except ValueError:
-                    continue
-        return 0.0
+    def get_last_box_balances(self, worksheet_name: Optional[str] = None) -> Tuple[float, float]:
+        return _last_box_balances(self._get_rows(worksheet_name)[1:])
 
     def get_last_receipt_number(self, worksheet_name: Optional[str] = None) -> int:
         rows = self._get_rows(worksheet_name)[1:]
         last_receipt = 0
         for row in rows:
-            if len(row) > 8 and str(row[8]).strip().isdigit():
-                val = int(row[8])
+            if len(row) > COL_RECEIPT and str(row[COL_RECEIPT]).strip().isdigit():
+                val = int(row[COL_RECEIPT])
                 if val > last_receipt:
                     last_receipt = val
         return last_receipt
@@ -304,7 +379,9 @@ class GoogleSheetsService(SheetsServiceInterface):
         )
         return transaction
 
-    def link_satispay_id(self, transaction_id: int, satispay_id: str, worksheet_name: Optional[str] = None) -> bool:
+    def link_payment_id(
+        self, transaction_id: int, payment_id: str, column_index: int, worksheet_name: Optional[str] = None
+    ) -> bool:
         name = worksheet_name or settings.GOOGLE_WORKSHEET_NAME
         rows = self._get_rows(name, force_refresh=True)
         target_row = None
@@ -315,11 +392,11 @@ class GoogleSheetsService(SheetsServiceInterface):
 
         if target_row is not None:
             ws = self._get_worksheet(name)
-            ws.update_cell(target_row, 12, satispay_id)
+            ws.update_cell(target_row, column_index + 1, payment_id)
             self._invalidate_cache(name)
             logger.info(
                 f"[GoogleSheets] Scrittura su foglio '{ws.title}': "
-                f"Collegato Satispay ID '{satispay_id}' alla riga {target_row} (Transazione ID #{transaction_id})"
+                f"Collegato ID pagamento '{payment_id}' alla riga {target_row} (Transazione ID #{transaction_id})"
             )
             return True
         logger.warning(
@@ -327,9 +404,10 @@ class GoogleSheetsService(SheetsServiceInterface):
         )
         return False
 
-    def unlink_satispay_id(
+    def unlink_payment_id(
         self,
-        satispay_id: str,
+        payment_id: str,
+        column_index: int,
         transaction_id: Optional[int] = None,
         worksheet_name: Optional[str] = None
     ) -> int:
@@ -339,10 +417,10 @@ class GoogleSheetsService(SheetsServiceInterface):
         unlinked_count = 0
 
         for idx, row in enumerate(rows[1:], start=2):
-            if len(row) > 11 and row[11] == satispay_id:
+            if len(row) > column_index and row[column_index] == payment_id:
                 row_id = row[0] if len(row) > 0 else ""
                 if transaction_id is None or str(row_id).strip() == str(transaction_id):
-                    ws.update_cell(idx, 12, "")
+                    ws.update_cell(idx, column_index + 1, "")
                     unlinked_count += 1
 
         if unlinked_count > 0:
@@ -351,9 +429,20 @@ class GoogleSheetsService(SheetsServiceInterface):
         target_info = f"dalla transazione #{transaction_id}" if transaction_id is not None else "da tutte le transazioni collegate"
         logger.info(
             f"[GoogleSheets] Scrittura su foglio '{ws.title}': "
-            f"Scollegato Satispay ID '{satispay_id}' {target_info} (righe modificate: {unlinked_count})"
+            f"Scollegato ID pagamento '{payment_id}' {target_info} (righe modificate: {unlinked_count})"
         )
         return unlinked_count
+
+    def link_satispay_id(self, transaction_id: int, satispay_id: str, worksheet_name: Optional[str] = None) -> bool:
+        return self.link_payment_id(transaction_id, satispay_id, SATISPAY_COLUMN_INDEX, worksheet_name)
+
+    def unlink_satispay_id(
+        self,
+        satispay_id: str,
+        transaction_id: Optional[int] = None,
+        worksheet_name: Optional[str] = None
+    ) -> int:
+        return self.unlink_payment_id(satispay_id, SATISPAY_COLUMN_INDEX, transaction_id, worksheet_name)
 
     def get_transaction_by_id(self, transaction_id: int, worksheet_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
         rows = self._get_rows(worksheet_name)
