@@ -1,6 +1,6 @@
 # 📊 GdG-Ledger-Bot
 
-Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestione della cassa contanti e sincronizzazione automatica su **Google Sheets**, con supporto nativo alle notifiche e collegamento dei pagamenti **Satispay Business**.
+Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestione della **doppia cassa contanti (🔴 Rossa / 🔵 Blu)** e sincronizzazione automatica su **Google Sheets**, con supporto nativo alle notifiche e al collegamento dei pagamenti **Satispay Business** e **SumUp**.
 
 ---
 
@@ -9,7 +9,7 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
 * **Sicurezza Chat Autorizzata**: Il bot risponde unicamente all'ID chat configurato nel file `.env`, ignorando ed isolando ogni comando proveniente da altre chat o utenti non autorizzati.
 * **Tag Esplicito dell'Utente nei Gruppi**: Il bot antepone a ogni domanda il tag diretto dell'utente (`👤 @username` o menzione diretta Telegram). In questo modo, anche se più membri interagiscono contemporaneamente nello stesso gruppo, è sempre evidente a colpo d'occhio chi deve rispondere.
 * **Procedura Guidata `/write` (shortcut `/w`)**:
-  * Richiede sequenzialmente: Data e Ora, Metodo (Contanti, Satispay o SumUp), conferma dei saldi di 🔴 Cassa Rossa e 🔵 Cassa Blu, Descrizione, Flusso (Entrata/Uscita), Importo, Cassa Blu aggiornata (solo se contanti, altrimenti i saldi restano invariati) e Numero ricevuta.
+  * Richiede sequenzialmente: Data e Ora, Metodo (Contanti, Satispay o SumUp), conferma dei saldi di 🔴 Cassa Rossa e 🔵 Cassa Blu, Descrizione, Flusso (Entrata/Uscita), Importo, saldo aggiornato della cassa usata (solo se contanti: Blu di default, Rossa con il pulsante dedicato; altrimenti i saldi restano invariati) e Numero ricevuta.
   * Interfaccia ottimizzata con **pulsanti interattivi (Inline Buttons)**:
     * Pulsante per impostare l'orario attuale (`/now`).
     * Pulsante per confermare gli ultimi saldi di Cassa Rossa e Cassa Blu registrati su Google Sheets (oppure inserirli a mano nel formato `Rossa Blu`, es. `120 35,50`).
@@ -32,7 +32,7 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
   * **Prestazioni e Reattività Elevate**: Caching intelligente della cartella di lavoro e dei dati (TTL 10s con invalidazione immediata in scrittura), esecuzione asincrona in thread separati (`asyncio.to_thread`) e risposta immediata alle callback dei pulsanti per eliminare qualsiasi tempo di attesa o spinner di caricamento.
 * **Integrazione Satispay Business 100% Autonoma (Polling + SQLite)**:
   * **Nessun Webhook, porta aperta o Cloudflare Tunnel**: il bot interroga periodicamente le API di Satispay in background tramite `JobQueue` interna.
-  * **Persistenza Locale su SQLite (`satispay_history.db`)**: memorizza i pagamenti ricevuti. Al riavvio del bot, recupera automaticamente qualsiasi transazione avvenuta a PC spento (Offline Catch-up) senza duplicare notifiche.
+  * **Persistenza Locale su SQLite (`satispay_history.db`)**: memorizza i pagamenti Satispay ricevuti (le transazioni SumUp stanno in una tabella separata dello stesso file). Al riavvio del bot, recupera automaticamente qualsiasi transazione avvenuta a PC spento (Offline Catch-up) senza duplicare notifiche.
   * **Comandi Storico Satispay**:
     * `/sat_list [data]` (alias `/sl`): visualizza l'elenco delle transazioni di una data (es: `/sat_list 30/09/2026` o oggi se omessa).
     * `/sat_list_range <da> <a>` (alias `/slr`): visualizza le transazioni in un intervallo di date (es: `/sat_list_range 01/09/2026 30/09/2026`).
@@ -61,27 +61,72 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
 
 ---
 
+## 🧭 Comandi
+
+| Comando (alias) | Cosa fa |
+|---|---|
+| `/write` (`/w`) | Registrazione guidata di una transazione |
+| `/transfer` (`/tr`, `/trasferimento`) | Sposta contanti tra Cassa Rossa e Cassa Blu |
+| `/cassa` (`/saldo`) | Mostra i saldi di Rossa e Blu e il totale |
+| `/link <id_transazione>` | Rispondendo a una notifica Satispay o SumUp, collega l'ID alla riga del foglio |
+| `/unlink [id_transazione]` | Rispondendo a una notifica, rimuove l'ID dal foglio (da tutte le righe o da una sola) |
+| `/sat_list [data]` (`/sl`) | Pagamenti Satispay di una data (oggi se omessa) |
+| `/sat_list_range <da> <a>` (`/slr`) | Pagamenti Satispay in un intervallo |
+| `/sat_get <ID>` (`/sg`) | Rievoca la notifica di un pagamento Satispay |
+| `/sumup_list [data]` (`/sul`) | Transazioni SumUp di una data (oggi se omessa) |
+| `/sumup_list_range <da> <a>` (`/sulr`) | Transazioni SumUp in un intervallo |
+| `/sumup_get <codice>` (`/sug`) | Rievoca la notifica di una transazione SumUp |
+| `/cancel` | Annulla l'operazione in corso |
+| `/start`, `/help` | Benvenuto e guida (con le macro disponibili) |
+| Macro da `custom_commands/` | Es. `/i`, `/bb`, `/r` |
+
+---
+
+## 🗂️ Layout del Foglio Google
+
+| Col | Intestazione | Note |
+|---|---|---|
+| A | ID | Progressivo automatico |
+| B | Data e Ora | `GG/MM/AAAA HH:MM:SS` |
+| C | Metodo | `Contanti`, `Satispay`, `SumUp` o `Trasferimento` |
+| D | Cassa Rossa Iniziale (€) | |
+| E | Cassa Blu Iniziale (€) | |
+| F | Descrizione | |
+| G | Flusso | `Entrata`, `Uscita` o `Trasferimento` |
+| H | Importo (€) | Quello inserito nel bot |
+| I | Cassa Rossa Aggiornata (€) | |
+| J | Cassa Blu Aggiornata (€) | |
+| K | Numero Ricevuta | `0` se assente |
+| L | Operatore | Username Telegram |
+| M | Telegram ID | |
+| N | ID Satispay | |
+| O | Data Registrazione | `GG/MM/AAAA HH:MM:SS` |
+| P | ID SumUp | `transaction_code` SumUp |
+
+---
+
 ## 📁 Struttura del Progetto
 
 ```text
 GdG-Ledger-Bot/
 ├── bot/
-│   ├── conversation.py        # Flusso interattivo /write e gestione comandi custom
+│   ├── conversation.py        # Flusso interattivo /write, /transfer e gestione comandi custom
 │   ├── custom_commands.py     # Loader file YAML e generatore comandi Telegram
-│   ├── handlers.py            # /start, /help, /link, /unlink, /sat_list, /sat_get
+│   ├── handlers.py            # /start, /help, /cassa, /link, /unlink, /sat_*, /sumup_*
 │   └── keyboards.py           # Inline Keyboards e bottoni interattivi
 ├── core/
 │   ├── models.py              # Modelli dati Pydantic (Transaction, CustomCommand, SatispayPayment, SumUpTransaction)
 │   ├── qr.py                  # Generazione immagini QR code
 │   └── security.py            # Decoratori e filtri di autorizzazione chat
 ├── services/
-│   ├── db_service.py          # Database SQLite locale per storico pagamenti Satispay
-│   ├── sheets_service.py      # Servizio Google Sheets (gspread) e Mock locale
+│   ├── db_service.py          # Database SQLite locale per lo storico pagamenti Satispay e transazioni SumUp
+│   ├── sheets_service.py      # Servizio Google Sheets (gspread), Mock locale e migrazione layout doppia cassa
 │   ├── satispay_service.py    # Client Satispay con HTTP Signatures e Polling
-│   └── sumup_service.py       # Client SumUp: storico, polling, abbinamento importo, checkout
+│   └── sumup_service.py       # Client SumUp: storico, polling, collegamento prima transazione, checkout con link
 ├── custom_commands/           # Cartella con le definizioni YAML dei comandi custom
 │   ├── iscrizione.yaml
-│   └── iscrizione_bayblade.yaml
+│   ├── iscrizione_bayblade.yaml
+│   └── rinnovo.yaml
 ├── logs/                      # Cartella file di log di sessione (generata all'avvio)
 ├── tests/                     # Suite di test unitari con Pytest
 │   ├── conftest.py
@@ -91,11 +136,15 @@ GdG-Ledger-Bot/
 │   ├── test_sumup_service.py
 │   └── test_sheets_service.py
 ├── .env.example               # Template variabili d'ambiente (senza segreti)
-├── .GEMINI.md                 # Guida dettagliata per ottenere credenziali API Google e Satispay
-├── main.py                    # Entry point: avvia Telegram Bot e JobQueue Satispay Polling
+├── .GEMINI.md                 # Guida per ottenere credenziali API Google, Satispay e SumUp e note sulla doppia cassa
+├── AGENTS.md                  # Contesto e convenzioni per le AI (CLAUDE.md lo importa)
+├── config.py                  # Impostazioni caricate dal file .env (pydantic-settings)
+├── main.py                    # Entry point: avvia Telegram Bot e JobQueue di polling Satispay e SumUp
 ├── requirements.txt           # Dipendenze Python
+├── run.sh                     # Avvio rapido usando il virtualenv locale (.venv o venv)
 └── satispay_setup.py          # Script interattivo per generazione chiavi RSA e scambio KeyID
 ```
+
 ---
 
 ## 🚀 Installazione e Avvio Rapido
@@ -123,6 +172,7 @@ Modifica `.env` con i tuoi valori:
 * `TELEGRAM_BOT_TOKEN`: Il token del bot fornito da BotFather.
 * `TELEGRAM_ALLOWED_CHAT_ID`: L'ID numerico della chat o gruppo abilitato.
 * `USE_MOCK_SHEETS`: Lascia `true` per provare subito il bot in memoria locale senza credenziali Google, oppure `false` una volta configurato Google Sheets.
+* `SUMUP_API_KEY`: secret key SumUp (se vuota l'integrazione SumUp è disattivata). Opzionali: `SUMUP_MERCHANT_CODE`, `SUMUP_POLL_INTERVAL` (default 15 s), `SUMUP_WAIT_TIMEOUT` (default 300 s) e `SUMUP_QR_ENABLED` (default `true`).
 * Per la guida completa all'ottenimento delle credenziali Google Sheets e Satispay, consulta il file [`.GEMINI.md`](.GEMINI.md), che descrive anche le variabili `SUMUP_*` (tra cui `SUMUP_QR_ENABLED` per disattivare il QR SumUp).
 
 ### 4. Esecuzione dei Test
@@ -135,7 +185,7 @@ pytest -v
 ```bash
 python main.py
 ```
-Il bot è ora attivo e completamente autonomo! Non serve avviare nessun tunnel, porta o server web esterno: il polling periodico di Satispay e la gestione dei comandi Telegram sono interamente orchestrati dal processo principale.
+Il bot è ora attivo e completamente autonomo! Non serve avviare nessun tunnel, porta o server web esterno: il polling periodico di Satispay e SumUp e la gestione dei comandi Telegram sono interamente orchestrati dal processo principale.
 
 ---
 
@@ -153,6 +203,8 @@ defaults:
   amount: 10.00             # Importo fisso
   description: "Pizza sociale"
 ```
+
+Campi disponibili in `defaults`: `date_time`, `method` (`Contanti`, `Satispay`, `SumUp`), `flow`, `amount`, `description`, `description_prefix`, `description_suffix`, `box_red`, `box_blue` e `cash_box` (`red` per usare sempre la Cassa Rossa, altrimenti Blu).
 
 È anche possibile omettere `description` e impostare un prefisso o suffisso (es. `description_prefix: "Iscrizione: "`), in modo che il bot chieda la causale all'utente mostrando l'anteprima e applicando automaticamente il prefisso!
 
