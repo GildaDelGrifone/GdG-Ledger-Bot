@@ -16,6 +16,8 @@ CALLBACK_QR_GENERATE = "qr:generate"
 CALLBACK_QR_SKIP = "qr:skip"
 CALLBACK_SUMUP_TERMINAL = "sumup:terminal"
 CALLBACK_SUMUP_LINK = "sumup:link"
+CALLBACK_CASH_USE_RED = "cash:use_red"
+CALLBACK_CASH_USE_BLUE = "cash:use_blue"
 CALLBACK_TRANSFER_BLUE_TO_RED = "transfer:blue_to_red"
 CALLBACK_TRANSFER_RED_TO_BLUE = "transfer:red_to_blue"
 
@@ -64,10 +66,15 @@ def get_flow_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def get_box_updated_keyboard(calculated_money: float) -> InlineKeyboardMarkup:
-    """Tastiera per confermare il saldo cassa calcolato"""
+def get_box_updated_keyboard(calculated_money: float, box: str = "blue") -> InlineKeyboardMarkup:
+    """Tastiera per confermare il saldo calcolato, con il pulsante per cambiare la cassa usata (Blu/Rossa)"""
+    if box == "red":
+        switch_button = InlineKeyboardButton("🔵 Usa Cassa Blu", callback_data=CALLBACK_CASH_USE_BLUE)
+    else:
+        switch_button = InlineKeyboardButton("🔴 Usa Cassa Rossa", callback_data=CALLBACK_CASH_USE_RED)
     buttons = [
         [InlineKeyboardButton(f"✅ Conferma {calculated_money:.2f} €", callback_data=CALLBACK_BOX_CONFIRM_CALCULATED)],
+        [switch_button],
         [InlineKeyboardButton("❌ Annulla", callback_data=CALLBACK_CANCEL)]
     ]
     return InlineKeyboardMarkup(buttons)
