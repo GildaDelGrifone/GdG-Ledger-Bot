@@ -49,6 +49,8 @@ from bot.keyboards import (
     CALLBACK_SUMUP_LINK,
     CALLBACK_TRANSFER_BLUE_TO_RED,
     CALLBACK_TRANSFER_RED_TO_BLUE,
+    CALLBACK_CASH_USE_RED,
+    CALLBACK_CASH_USE_BLUE,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,7 +173,10 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             prompt_title = "🪙 <b>Conferma saldi delle casse attuali:</b>\n"
 
         if method == "Contanti":
-            cash_note = "Il contante di questa transazione entra/esce dalla 🔵 Cassa Blu.\n\n"
+            cash_note = (
+                "Il contante di questa transazione entra/esce dalla 🔵 Cassa Blu "
+                "(potrai scegliere la 🔴 Rossa al passaggio successivo).\n\n"
+            )
         elif is_transfer:
             cash_note = ""
         else:
@@ -236,7 +241,7 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return STATE_AMOUNT
 
     # 7. Saldi aggiornati delle casse
-    if "box_blue_updated" not in data:
+    if "box_red_updated" not in data or "box_blue_updated" not in data:
         red_init = data.get("box_red", 0.0)
         blue_init = data.get("box_blue", 0.0)
         amount = data.get("amount", 0.0)
@@ -250,20 +255,28 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 data["box_red_updated"] = red_init - amount
                 data["box_blue_updated"] = blue_init + amount
         elif method == "Contanti":
-            # Il contante delle transazioni entra/esce sempre dalla Cassa Blu
-            data["box_red_updated"] = red_init
+            # Il contante entra/esce dalla Cassa Blu (default) o dalla Rossa se scelta con il pulsante
+            box = data.get("cash_box", "blue")
+            if box == "red":
+                used_init, other_init = red_init, blue_init
+                used_label, other_label = "🔴 Cassa Rossa", "🔵 Cassa Blu"
+                data["box_blue_updated"] = blue_init
+            else:
+                used_init, other_init = blue_init, red_init
+                used_label, other_label = "🔵 Cassa Blu", "🔴 Cassa Rossa"
+                data["box_red_updated"] = red_init
             flow = data.get("flow", "Entrata")
-            calc_blue = blue_init + amount if flow == "Entrata" else blue_init - amount
-            context.user_data["suggested_box_after"] = calc_blue
+            calc_used = used_init + amount if flow == "Entrata" else used_init - amount
+            context.user_data["suggested_box_after"] = calc_used
 
             sign = "+" if flow == "Entrata" else "-"
             await send_msg(
                 update,
-                f"🔵 <b>Cassa Blu aggiornata (dopo la transazione):</b>\n"
-                f"Saldo calcolato: <b>{calc_blue:.2f} €</b> ({blue_init:.2f} € {sign} {amount:.2f} €)\n"
-                f"🔴 Cassa Rossa invariata: {red_init:.2f} €\n\n"
+                f"<b>{used_label} aggiornata (dopo la transazione):</b>\n"
+                f"Saldo calcolato: <b>{calc_used:.2f} €</b> ({used_init:.2f} € {sign} {amount:.2f} €)\n"
+                f"{other_label} invariata: {other_init:.2f} €\n\n"
                 "Premi il pulsante per confermare il saldo calcolato oppure scrivi il valore reale se differisce.",
-                reply_markup=get_box_updated_keyboard(calc_blue),
+                reply_markup=get_box_updated_keyboard(calc_used, box),
             )
             return STATE_BOX_AFTER
         else:
@@ -384,7 +397,12 @@ async def finalize_and_save_transaction(update: Update, context: ContextTypes.DE
     def _fmt(value) -> str:
         return f"{value:.2f} €" if value is not None else "-"
 
-    box_info = (
+    cash_box_line = ""
+    if registered_tx.method == "Contanti":
+        used = "🔴 Rossa" if data.get("cash_box") == "red" else "🔵 Blu"
+        cash_box_line = f"💵 <b>Cassa usata:</b> {used}\n"
+
+    box_info = cash_box_line + (
         f"🔴 <b>Cassa Rossa:</b> <code>{_fmt(registered_tx.box_red)} → {_fmt(registered_tx.box_red_updated)}</code>\n"
         f"🔵 <b>Cassa Blu:</b> <code>{_fmt(registered_tx.box_blue)} → {_fmt(registered_tx.box_blue_updated)}</code>\n"
     )
@@ -500,6 +518,8 @@ def make_custom_command_starter(config: CustomCommandConfig):
             data["box_red"] = float(defaults.box_red)
         if defaults.box_blue is not None:
             data["box_blue"] = float(defaults.box_blue)
+        if defaults.cash_box and defaults.cash_box.lower() in ("red", "rossa"):
+            data["cash_box"] = "red"
 
         context.user_data["tx_data"] = data
         return await advance_or_finish(update, context)
@@ -707,7 +727,7 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_box_after_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Gestisce la conferma o inserimento manuale del saldo aggiornato della Cassa Blu"""
+    """Gestisce la conferma o inserimento manuale del saldo aggiornato della cassa usata (Blu di default, Rossa se scelta)"""
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
@@ -715,20 +735,28 @@ async def handle_box_after_input(update: Update, context: ContextTypes.DEFAULT_T
         query_data = update.callback_query.data
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
+        if query_data in (CALLBACK_CASH_USE_RED, CALLBACK_CASH_USE_BLUE):
+            data["cash_box"] = "red" if query_data == CALLBACK_CASH_USE_RED else "blue"
+            # Ricalcola il passo per la cassa scelta
+            data.pop("box_red_updated", None)
+            data.pop("box_blue_updated", None)
+            return await advance_or_finish(update, context)
         if query_data == CALLBACK_BOX_CONFIRM_CALCULATED:
-            data["box_blue_updated"] = context.user_data.get("suggested_box_after", 0.0)
+            data[f"box_{data.get('cash_box', 'blue')}_updated"] = context.user_data.get("suggested_box_after", 0.0)
             return await advance_or_finish(update, context)
 
     text = update.message.text.strip() if update.message else ""
     if text == "/cancel":
         return await handle_cancel(update, context)
 
+    box = data.get("cash_box", "blue")
     try:
         val = float(text.replace("€", "").replace(",", ".").strip())
-        data["box_blue_updated"] = val
+        data[f"box_{box}_updated"] = val
         return await advance_or_finish(update, context)
     except ValueError:
-        await send_msg(update, "⚠️ Inserisci un importo valido per la Cassa Blu aggiornata.")
+        box_name = "Rossa" if box == "red" else "Blu"
+        await send_msg(update, f"⚠️ Inserisci un importo valido per la Cassa {box_name} aggiornata.")
         return STATE_BOX_AFTER
 
 

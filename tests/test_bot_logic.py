@@ -488,3 +488,129 @@ async def test_transfer_rejects_amount_above_source_balance():
     assert await handle_amount_input(update, context) == STATE_AMOUNT
     assert "amount" not in context.user_data["tx_data"]
     assert "Saldo insufficiente" in update.effective_chat.send_message.call_args.kwargs["text"]
+
+
+def _cash_context(box_red=100.0, box_blue=20.0, extra=None):
+    from unittest.mock import MagicMock
+
+    context = MagicMock()
+    tx = {
+        "date_time": "08/10/2026 18:00:00", "method": "Contanti", "box_red": box_red, "box_blue": box_blue,
+        "description": "Incasso", "flow": "Entrata", "amount": 10.0, "receipt_number": 0,
+    }
+    tx.update(extra or {})
+    context.user_data = {"tx_data": tx}
+    return context
+
+
+def _press(update, callback_data):
+    from unittest.mock import AsyncMock, MagicMock
+
+    update.callback_query = MagicMock()
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.data = callback_data
+
+
+@pytest.mark.asyncio
+async def test_cash_transaction_can_use_red_box_via_button():
+    from unittest.mock import patch
+    from telegram.ext import ConversationHandler
+    from bot.conversation import advance_or_finish, handle_box_after_input, STATE_BOX_AFTER
+    from bot.keyboards import CALLBACK_CASH_USE_RED, CALLBACK_BOX_CONFIRM_CALCULATED
+    from services.sheets_service import MockSheetsService
+
+    mock_sheets = MockSheetsService()
+    with patch("bot.conversation.get_sheets_service", return_value=mock_sheets):
+        update = _make_update()
+        context = _cash_context()
+
+        # Default: Blu, con il pulsante per passare alla Rossa
+        assert await advance_or_finish(update, context) == STATE_BOX_AFTER
+        kb = update.effective_chat.send_message.call_args.kwargs["reply_markup"]
+        assert any("Usa Cassa Rossa" in b.text for row in kb.inline_keyboard for b in row)
+
+        # Passa alla Rossa: il saldo proposto è quello della Rossa
+        _press(update, CALLBACK_CASH_USE_RED)
+        assert await handle_box_after_input(update, context) == STATE_BOX_AFTER
+        assert context.user_data["suggested_box_after"] == 110.0
+        sent = update.effective_chat.send_message.call_args.kwargs
+        assert "Cassa Rossa aggiornata" in sent["text"]
+        assert any("Usa Cassa Blu" in b.text for row in sent["reply_markup"].inline_keyboard for b in row)
+
+        _press(update, CALLBACK_BOX_CONFIRM_CALCULATED)
+        assert await handle_box_after_input(update, context) == ConversationHandler.END
+
+        row = mock_sheets._get_sheet_data()[1]
+        assert row[2] == "Contanti"
+        assert (row[3], row[4]) == ("100.00", "20.00")
+        assert (row[8], row[9]) == ("110.00", "20.00")
+        assert "Cassa usata" in update.effective_chat.send_message.call_args_list[-1].kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_cash_transaction_switch_back_to_blue():
+    from unittest.mock import patch
+    from telegram.ext import ConversationHandler
+    from bot.conversation import handle_box_after_input, advance_or_finish
+    from bot.keyboards import CALLBACK_CASH_USE_RED, CALLBACK_CASH_USE_BLUE, CALLBACK_BOX_CONFIRM_CALCULATED
+    from services.sheets_service import MockSheetsService
+
+    mock_sheets = MockSheetsService()
+    with patch("bot.conversation.get_sheets_service", return_value=mock_sheets):
+        update = _make_update()
+        context = _cash_context()
+        await advance_or_finish(update, context)
+        for cb in (CALLBACK_CASH_USE_RED, CALLBACK_CASH_USE_BLUE):
+            _press(update, cb)
+            await handle_box_after_input(update, context)
+        _press(update, CALLBACK_BOX_CONFIRM_CALCULATED)
+        assert await handle_box_after_input(update, context) == ConversationHandler.END
+
+        row = mock_sheets._get_sheet_data()[1]
+        assert (row[8], row[9]) == ("100.00", "30.00")
+
+
+@pytest.mark.asyncio
+async def test_cash_transaction_manual_value_goes_to_red_box():
+    from unittest.mock import patch
+    from telegram.ext import ConversationHandler
+    from bot.conversation import handle_box_after_input, advance_or_finish
+    from services.sheets_service import MockSheetsService
+
+    mock_sheets = MockSheetsService()
+    with patch("bot.conversation.get_sheets_service", return_value=mock_sheets):
+        update = _make_update()
+        context = _cash_context(extra={"cash_box": "red"})  # come da macro con cash_box: red
+        await advance_or_finish(update, context)
+        assert "Cassa Rossa aggiornata" in update.effective_chat.send_message.call_args.kwargs["text"]
+
+        update.callback_query = None
+        update.message.text = "105,50"
+        assert await handle_box_after_input(update, context) == ConversationHandler.END
+
+        row = mock_sheets._get_sheet_data()[1]
+        assert (row[8], row[9]) == ("105.50", "20.00")
+
+
+@pytest.mark.asyncio
+async def test_custom_command_cash_box_default_red():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from bot.conversation import make_custom_command_starter, STATE_BOX_AFTER
+    from core.models import CustomCommandConfig, CustomCommandDefaults
+    from services.sheets_service import MockSheetsService
+
+    cfg = CustomCommandConfig(
+        command="x", description="d",
+        defaults=CustomCommandDefaults(
+            date_time="now", method="Contanti", flow="Entrata", amount=10.0, description="Test",
+            box_red=100.0, box_blue=20.0, cash_box="red",
+        ),
+    )
+    context = MagicMock()
+    context.user_data = {"tx_data": {"receipt_number": 0}}
+    with patch("bot.conversation.get_sheets_service", return_value=MockSheetsService()):
+        update = _make_update()
+        state = await make_custom_command_starter(cfg)(update, context)
+        # receipt_number non preimpostato nella macro: si arriva comunque al passo del saldo aggiornato
+        assert state == STATE_BOX_AFTER
+        assert "Cassa Rossa aggiornata" in update.effective_chat.send_message.call_args.kwargs["text"]

@@ -18,7 +18,7 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
   * Registra l'username e l'ID Telegram dell'operatore per audit e sicurezza.
   * Invia un riepilogo formattato in chat alla conclusione dell'inserimento.
 * **Doppia Cassa Contanti (🔴 Rossa / 🔵 Blu)**:
-  * **Cassa Rossa**: cassa principale. **Cassa Blu**: piccola cassa per il resto e per custodire l'incasso finché l'eccedenza non viene versata nella Rossa. Le transazioni in contanti entrano/escono sempre dalla Cassa Blu.
+  * **Cassa Rossa**: cassa principale. **Cassa Blu**: piccola cassa per il resto e per custodire l'incasso finché l'eccedenza non viene versata nella Rossa. Le transazioni in contanti usano la Cassa Blu per default; al passaggio del saldo aggiornato il pulsante **🔴 Usa Cassa Rossa** (e **🔵 Usa Cassa Blu** per tornare indietro) permette di usare direttamente la Rossa, senza passare da `/transfer`. Le macro YAML possono impostare `cash_box: red` nei `defaults` per puntare sempre alla Rossa.
   * Ogni riga del foglio registra i saldi iniziali e aggiornati di **entrambe** le casse (colonne D/E e I/J).
   * `/cassa` (alias `/saldo`): mostra i saldi attuali di Rossa e Blu e il totale contanti.
   * `/transfer` (alias `/tr`, `/trasferimento`): sposta contanti scegliendo la direzione (**Blu → Rossa** per versare l'eccedenza, **Rossa → Blu** per ricaricare il resto). Chiede conferma dei saldi e l'importo (che non può superare il saldo della cassa di origine) e registra una riga con metodo e flusso `Trasferimento`, senza ricevuta.

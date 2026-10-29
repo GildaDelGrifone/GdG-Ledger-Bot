@@ -138,7 +138,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Per le entrate con Satispay o SumUp il bot può attendere il pagamento e collegarlo in automatico.\n"
         f"{custom_text}\n"
         "🔹 <b>Doppia cassa (🔴 Rossa / 🔵 Blu):</b>\n"
-        "Il contante è diviso in Cassa Rossa (principale) e Cassa Blu (resto). Le transazioni in contanti usano la Cassa Blu.\n"
+        "Il contante è diviso in Cassa Rossa (principale) e Cassa Blu (resto). Le transazioni in contanti usano la Cassa Blu per default (puoi scegliere la Rossa con il pulsante 🔴 al passaggio del saldo aggiornato).\n"
         "• <code>/cassa</code> (o <code>/saldo</code>): Mostra i saldi attuali delle due casse.\n"
         "• <code>/transfer</code> (o <code>/tr</code>): Sposta contanti da Blu a Rossa o da Rossa a Blu.\n\n"
         "🔹 <b>Integrazione Satispay &amp; Collegamento:</b>\n"

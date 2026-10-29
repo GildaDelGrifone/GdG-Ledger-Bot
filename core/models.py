@@ -125,6 +125,7 @@ class CustomCommandDefaults(BaseModel):
     description_suffix: Optional[str] = None
     box_red: Optional[float] = None
     box_blue: Optional[float] = None
+    cash_box: Optional[str] = None   # es: "blue" (default) o "red": cassa usata per i contanti
 
 
 class CustomCommandConfig(BaseModel):
