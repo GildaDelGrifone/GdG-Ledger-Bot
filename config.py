@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     SATISPAY_POLL_INTERVAL: int = 10  # Intervallo polling in secondi
     SQLITE_DB_PATH: str = "satispay_history.db"
 
+    # SumUp
+    SUMUP_API_KEY: Optional[str] = None
+    SUMUP_MERCHANT_CODE: Optional[str] = None
+    SUMUP_POLL_INTERVAL: int = 15  # Intervallo polling in secondi
+    SUMUP_WAIT_TIMEOUT: int = 300  # Attesa massima del pagamento in /write (secondi)
+    SUMUP_QR_ENABLED: bool = True  # Se false, nasconde la generazione del QR/link di pagamento
+
     # Custom Commands
     CUSTOM_COMMANDS_DIR: str = "custom_commands"
 

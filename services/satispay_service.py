@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from config import settings
 from core.models import SatispayPayment
+from core.qr import generate_qr_code_image
 
 logger = logging.getLogger(__name__)
 
@@ -166,24 +167,7 @@ class SatispayService:
         """
         Genera un'immagine PNG in memoria contenente il codice QR della stringa o URL passato
         """
-        import io
-        import qrcode
-
-        qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=10,
-            border=2,
-        )
-        qr.add_data(data_to_encode)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-
-        buffer = io.BytesIO()
-        img.save(buffer, format="PNG")
-        buffer.seek(0)
-        return buffer
-
+        return generate_qr_code_image(data_to_encode)
 
     async def get_payments_history(self, limit: int = 50) -> List[SatispayPayment]:
         """

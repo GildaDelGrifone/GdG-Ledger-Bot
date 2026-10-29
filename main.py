@@ -9,9 +9,10 @@ from telegram.ext import (
     ContextTypes,
 )
 from config import settings
-from core.models import SatispayPayment
+from core.models import SatispayPayment, SumUpTransaction
 from services.sheets_service import get_sheets_service
 from services.satispay_service import satispay_service
+from services.sumup_service import sumup_service
 from services.db_service import db_service
 from bot.custom_commands import load_custom_commands, build_bot_commands_list
 from bot.conversation import build_conversation_handler
@@ -23,8 +24,13 @@ from bot.handlers import (
     sat_list_handler,
     sat_list_range_handler,
     sat_get_handler,
+    cassa_handler,
+    sumup_list_handler,
+    sumup_list_range_handler,
+    sumup_get_handler,
     error_handler,
     format_satispay_echo,
+    format_sumup_echo,
 )
 
 # Creazione cartella logs e generazione file di log con data e ora di avvio
@@ -83,6 +89,34 @@ async def poll_satispay_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Errore durante il job di polling Satispay: {e}")
 
 
+async def send_sumup_echo(bot, tx: SumUpTransaction):
+    """
+    Invia il messaggio di echo della transazione SumUp nella chat Telegram autorizzata
+    """
+    chat_id = settings.TELEGRAM_ALLOWED_CHAT_ID
+    if not chat_id:
+        logger.warning("TELEGRAM_ALLOWED_CHAT_ID non configurato.")
+        return
+
+    try:
+        await bot.send_message(chat_id=chat_id, text=format_sumup_echo(tx), parse_mode="HTML")
+        logger.info(f"Notifica SumUp {tx.transaction_code} ({tx.amount:.2f}€) inviata alla chat {chat_id}")
+    except Exception as e:
+        logger.error(f"Errore durante l'invio della notifica SumUp su Telegram: {e}")
+
+
+async def poll_sumup_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Job periodico che interroga le API SumUp e notifica eventuali nuove transazioni
+    """
+    try:
+        new_transactions = await sumup_service.poll_new_transactions()
+        for t in new_transactions:
+            await send_sumup_echo(context.bot, t)
+    except Exception as e:
+        logger.error(f"Errore durante il job di polling SumUp: {e}")
+
+
 async def post_init(application):
     """
     Inizializzazione post-avvio del bot: verifica foglio di calcolo e registra setMyCommands
@@ -130,11 +164,17 @@ def create_telegram_app():
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("link", link_handler))
     app.add_handler(CommandHandler("unlink", unlink_handler))
+    app.add_handler(CommandHandler(["cassa", "saldo"], cassa_handler))
 
     # Registra handler comandi storico Satispay
     app.add_handler(CommandHandler(["sat_list", "sl"], sat_list_handler))
     app.add_handler(CommandHandler(["sat_list_range", "slr"], sat_list_range_handler))
     app.add_handler(CommandHandler(["sat_get", "sg"], sat_get_handler))
+
+    # Registra handler comandi storico SumUp
+    app.add_handler(CommandHandler(["sumup_list", "sul"], sumup_list_handler))
+    app.add_handler(CommandHandler(["sumup_list_range", "sulr"], sumup_list_range_handler))
+    app.add_handler(CommandHandler(["sumup_get", "sug"], sumup_get_handler))
 
     # Handler errori
     app.add_error_handler(error_handler)
@@ -143,6 +183,14 @@ def create_telegram_app():
     poll_interval = max(5, settings.SATISPAY_POLL_INTERVAL)
     app.job_queue.run_repeating(poll_satispay_job, interval=poll_interval, first=2)
     logger.info(f"JobQueue Satispay Polling configurato ogni {poll_interval} secondi.")
+
+    # Polling periodico SumUp (solo se la API key è configurata)
+    if sumup_service.is_configured:
+        sumup_interval = max(10, settings.SUMUP_POLL_INTERVAL)
+        app.job_queue.run_repeating(poll_sumup_job, interval=sumup_interval, first=5)
+        logger.info(f"JobQueue SumUp Polling configurato ogni {sumup_interval} secondi.")
+    else:
+        logger.info("SumUp non configurato (SUMUP_API_KEY assente): polling disattivato.")
 
     return app
 

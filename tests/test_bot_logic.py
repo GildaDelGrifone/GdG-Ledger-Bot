@@ -1,3 +1,4 @@
+import re
 import tempfile
 import pytest
 from config import settings
@@ -232,7 +233,7 @@ async def test_satispay_box_money_flow():
     from services.sheets_service import MockSheetsService
 
     mock_sheets = MockSheetsService()
-    mock_sheets.get_last_box_money = MagicMock(return_value=120.50)
+    mock_sheets.get_last_box_balances = MagicMock(return_value=(120.50, 30.00))
 
     with patch("bot.conversation.get_sheets_service", return_value=mock_sheets):
         update = MagicMock()
@@ -253,11 +254,12 @@ async def test_satispay_box_money_flow():
         next_state = await advance_or_finish(update, context)
         assert next_state == STATE_BOX_BEFORE
         sent_text = update.effective_chat.send_message.call_args.kwargs["text"]
-        assert "Conferma saldo cassa attuale" in sent_text
-        assert "120.50 €" in sent_text
+        assert "Conferma saldi delle casse attuali" in sent_text
+        assert "120.50 €" in sent_text and "30.00 €" in sent_text
 
-        # Now simulate user input for box_money (via button or text)
-        context.user_data["tx_data"]["box_money"] = 120.50
+        # Now simulate user input for the balances (via button or text)
+        context.user_data["tx_data"]["box_red"] = 120.50
+        context.user_data["tx_data"]["box_blue"] = 30.00
         context.user_data["tx_data"]["description"] = "Test Satispay Spesa"
         context.user_data["tx_data"]["flow"] = "Uscita"
         context.user_data["tx_data"]["amount"] = 15.00
@@ -267,14 +269,222 @@ async def test_satispay_box_money_flow():
         final_state = await advance_or_finish(update, context)
         assert final_state == ConversationHandler.END
 
-        # Verify sheets row has Column D (index 3) and Column H (index 7) with 120.50
+        # Con Satispay i saldi aggiornati (I/J) coincidono con quelli iniziali (D/E)
         row = mock_sheets._get_sheet_data()[1]
-        assert row[3] == "120.50"  # Col D: Cassa Iniziale (€)
-        assert row[7] == "120.50"  # Col H: Cassa Aggiornata (€)
+        assert row[3] == "120.50" and row[4] == "30.00"
+        assert row[8] == "120.50" and row[9] == "30.00"
 
-        # Verify summary message contains confirmed cash
         summary_call = update.effective_chat.send_message.call_args_list[-1]
         summary_text = summary_call.kwargs["text"]
-        assert "Cassa attuale confermata" in summary_text
+        assert "Cassa Rossa" in summary_text and "Cassa Blu" in summary_text
         assert "120.50 €" in summary_text
 
+
+
+def test_extract_payment_ref():
+    from bot.handlers import extract_payment_ref, format_sumup_echo
+    from core.models import SumUpTransaction
+
+    tx = SumUpTransaction(transaction_code="TEENSK4W2K", amount=12.5, status="SUCCESSFUL", card_type="VISA")
+    # Telegram restituisce il testo senza tag HTML quando si risponde a un messaggio
+    plain = re.sub(r"<[^>]+>", "", format_sumup_echo(tx))
+    assert extract_payment_ref(plain) == ("sumup", "TEENSK4W2K")
+    assert extract_payment_ref("ID Satispay: sat_custom_123") == ("satispay", "sat_custom_123")
+    assert extract_payment_ref("niente da vedere") == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_sumup_method_aligns_box_money_and_ask_keyboard(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from telegram.ext import ConversationHandler
+    from bot.conversation import advance_or_finish, STATE_SUMUP_ASK
+    from config import settings
+    from services.sheets_service import MockSheetsService
+
+    mock_sheets = MockSheetsService()
+    with patch("bot.conversation.get_sheets_service", return_value=mock_sheets):
+        update = MagicMock()
+        update.effective_chat.send_message = AsyncMock()
+        update.callback_query = None
+        update.effective_user.username = "test_user"
+        update.effective_user.id = 123
+
+        base = {
+            "date_time": "08/10/2026 18:00:00", "method": "SumUp", "box_red": 50.0, "box_blue": 10.0,
+            "description": "Test SumUp", "flow": "Entrata", "amount": 15.0, "receipt_number": 0,
+        }
+
+        # QR abilitato: il prompt offre terminale + link
+        monkeypatch.setattr(settings, "SUMUP_QR_ENABLED", True)
+        context = MagicMock()
+        context.user_data = {"tx_data": dict(base)}
+        assert await advance_or_finish(update, context) == STATE_SUMUP_ASK
+        kb = update.effective_chat.send_message.call_args.kwargs["reply_markup"]
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        assert any("QR link" in l for l in labels)
+
+        # QR disabilitato: il pulsante del link non compare
+        monkeypatch.setattr(settings, "SUMUP_QR_ENABLED", False)
+        context = MagicMock()
+        context.user_data = {"tx_data": dict(base)}
+        assert await advance_or_finish(update, context) == STATE_SUMUP_ASK
+        kb = update.effective_chat.send_message.call_args.kwargs["reply_markup"]
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        assert not any("QR link" in l for l in labels)
+        assert any("terminale" in l for l in labels)
+
+        # Scelta "salta": registra con cassa D/H allineata
+        context.user_data["tx_data"]["sumup_choice_done"] = True
+        assert await advance_or_finish(update, context) == ConversationHandler.END
+        row = mock_sheets._get_sheet_data()[1]
+        assert row[2] == "SumUp"
+        assert row[3] == "50.00" and row[4] == "10.00"
+        assert row[8] == "50.00" and row[9] == "10.00"
+
+
+@pytest.mark.asyncio
+async def test_sumup_skip_while_waiting_registers_without_id():
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from telegram.ext import ConversationHandler
+    from bot.conversation import handle_qr_waiting_input
+    from bot.keyboards import CALLBACK_QR_SKIP
+    from services.sheets_service import MockSheetsService
+
+    mock_sheets = MockSheetsService()
+    with patch("bot.conversation.get_sheets_service", return_value=mock_sheets):
+        update = MagicMock()
+        update.effective_chat.send_message = AsyncMock()
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.data = CALLBACK_QR_SKIP
+        update.effective_user.username = "test_user"
+        update.effective_user.id = 123
+
+        context = MagicMock()
+        context.user_data = {"tx_data": {
+            "date_time": "08/10/2026 18:00:00", "method": "SumUp", "box_red": 50.0, "box_blue": 10.0,
+            "description": "Test", "flow": "Entrata", "amount": 5.0, "receipt_number": 0,
+        }}
+
+        assert await handle_qr_waiting_input(update, context) == ConversationHandler.END
+        row = mock_sheets._get_sheet_data()[1]
+        assert row[7] == "5.00"   # importo inserito dall'operatore
+        assert row[15] == ""      # nessun ID SumUp
+
+
+def test_parse_two_amounts():
+    from bot.conversation import parse_two_amounts
+
+    assert parse_two_amounts("120 35,50") == (120.0, 35.5)
+    assert parse_two_amounts("120/35.5") == (120.0, 35.5)
+    assert parse_two_amounts("€ 10 € 5") == (10.0, 5.0)
+    assert parse_two_amounts("120") is None
+    assert parse_two_amounts("a b") is None
+    assert parse_two_amounts("1 2 3") is None
+
+
+def _make_update():
+    from unittest.mock import AsyncMock, MagicMock
+
+    update = MagicMock()
+    update.effective_chat.send_message = AsyncMock()
+    update.effective_chat.id = settings.TELEGRAM_ALLOWED_CHAT_ID
+    update.callback_query = None
+    update.effective_user.username = "test_user"
+    update.effective_user.id = 123
+    return update
+
+
+@pytest.mark.asyncio
+async def test_cash_transaction_moves_only_blue_box():
+    from unittest.mock import MagicMock, patch
+    from telegram.ext import ConversationHandler
+    from bot.conversation import advance_or_finish, STATE_BOX_AFTER, handle_box_after_input
+    from bot.keyboards import CALLBACK_BOX_CONFIRM_CALCULATED
+    from services.sheets_service import MockSheetsService
+
+    mock_sheets = MockSheetsService()
+    with patch("bot.conversation.get_sheets_service", return_value=mock_sheets):
+        update = _make_update()
+        context = MagicMock()
+        context.user_data = {"tx_data": {
+            "date_time": "08/10/2026 18:00:00", "method": "Contanti", "box_red": 100.0, "box_blue": 20.0,
+            "description": "Incasso", "flow": "Entrata", "amount": 10.0, "receipt_number": 0,
+        }}
+
+        # Il bot propone il saldo calcolato della sola Cassa Blu
+        assert await advance_or_finish(update, context) == STATE_BOX_AFTER
+        assert context.user_data["suggested_box_after"] == 30.0
+
+        # L'utente conferma il saldo calcolato
+        from unittest.mock import AsyncMock
+        update.callback_query = MagicMock()
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.data = CALLBACK_BOX_CONFIRM_CALCULATED
+        assert await handle_box_after_input(update, context) == ConversationHandler.END
+
+        row = mock_sheets._get_sheet_data()[1]
+        assert (row[3], row[4]) == ("100.00", "20.00")
+        assert (row[8], row[9]) == ("100.00", "30.00")
+        assert mock_sheets.get_last_box_balances() == (100.0, 30.0)
+
+
+@pytest.mark.asyncio
+async def test_transfer_blue_to_red_and_red_to_blue():
+    from unittest.mock import MagicMock, patch
+    from telegram.ext import ConversationHandler
+    from bot.conversation import (
+        start_transfer, advance_or_finish, handle_transfer_direction_input,
+        handle_box_before_input, handle_amount_input, STATE_TRANSFER_DIRECTION, STATE_BOX_BEFORE,
+    )
+    from bot.keyboards import CALLBACK_TRANSFER_BLUE_TO_RED, CALLBACK_TRANSFER_RED_TO_BLUE
+    from unittest.mock import AsyncMock
+    from services.sheets_service import MockSheetsService
+
+    mock_sheets = MockSheetsService()
+    with patch("bot.conversation.get_sheets_service", return_value=mock_sheets):
+        for callback, start_balances, amount, expected_after, expected_desc in [
+            (CALLBACK_TRANSFER_BLUE_TO_RED, "100 30", "20", ("120.00", "10.00"), "Trasferimento Blu → Rossa"),
+            (CALLBACK_TRANSFER_RED_TO_BLUE, "100 30", "40", ("60.00", "70.00"), "Trasferimento Rossa → Blu"),
+        ]:
+            update = _make_update()
+            context = MagicMock()
+            context.user_data = {}
+
+            assert await start_transfer(update, context) == STATE_TRANSFER_DIRECTION
+
+            update.callback_query = MagicMock()
+            update.callback_query.answer = AsyncMock()
+            update.callback_query.data = callback
+            assert await handle_transfer_direction_input(update, context) == STATE_BOX_BEFORE
+
+            update.callback_query = None
+            update.message.text = start_balances
+            from bot.conversation import STATE_AMOUNT
+            assert await handle_box_before_input(update, context) == STATE_AMOUNT
+
+            update.message.text = amount
+            assert await handle_amount_input(update, context) == ConversationHandler.END
+
+            row = mock_sheets._get_sheet_data()[-1]
+            assert row[2] == "Trasferimento" and row[6] == "Trasferimento"
+            assert row[5] == expected_desc
+            assert row[7] == f"{float(amount):.2f}"
+            assert (row[8], row[9]) == expected_after
+            assert row[10] == 0  # nessuna ricevuta
+
+
+@pytest.mark.asyncio
+async def test_transfer_rejects_amount_above_source_balance():
+    from unittest.mock import MagicMock, patch
+    from bot.conversation import handle_amount_input, STATE_AMOUNT
+
+    update = _make_update()
+    update.message.text = "50"
+    context = MagicMock()
+    context.user_data = {"tx_data": {
+        "kind": "transfer", "transfer_direction": "blue_to_red", "box_red": 500.0, "box_blue": 30.0,
+    }}
+
+    assert await handle_amount_input(update, context) == STATE_AMOUNT
+    assert "amount" not in context.user_data["tx_data"]
+    assert "Saldo insufficiente" in update.effective_chat.send_message.call_args.kwargs["text"]

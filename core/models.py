@@ -40,16 +40,19 @@ class Transaction(BaseModel):
     """
     id: Optional[int] = None
     date_time: str
-    method: str  # "Contanti" oppure "Satispay"
-    box_money: Optional[float] = None  # Cassa iniziale prima della transazione (o saldo confermato per Satispay)
+    method: str  # "Contanti", "Satispay", "SumUp" oppure "Trasferimento"
+    box_red: Optional[float] = None  # Saldo Cassa Rossa prima della transazione
+    box_blue: Optional[float] = None  # Saldo Cassa Blu prima della transazione
     description: str
-    flow: str  # "Entrata" oppure "Uscita"
+    flow: str  # "Entrata", "Uscita" oppure "Trasferimento"
     amount: float
-    box_money_updated: Optional[float] = None  # Cassa aggiornata (o saldo confermato per Satispay)
+    box_red_updated: Optional[float] = None  # Saldo Cassa Rossa dopo la transazione
+    box_blue_updated: Optional[float] = None  # Saldo Cassa Blu dopo la transazione
     receipt_number: int  # Numero progressivo ricevuta (0 se non applicabile)
     telegram_username: str
     telegram_user_id: int
     satispay_id: Optional[str] = None
+    sumup_id: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
 
     @field_validator("date_time", "created_at", mode="before")
@@ -69,16 +72,19 @@ class Transaction(BaseModel):
             self.id if self.id is not None else "",
             format_datetime_for_sheet(self.date_time),
             self.method,
-            f"{self.box_money:.2f}" if self.box_money is not None else "",
+            f"{self.box_red:.2f}" if self.box_red is not None else "",
+            f"{self.box_blue:.2f}" if self.box_blue is not None else "",
             self.description,
             self.flow,
             f"{self.amount:.2f}",
-            f"{self.box_money_updated:.2f}" if self.box_money_updated is not None else "",
+            f"{self.box_red_updated:.2f}" if self.box_red_updated is not None else "",
+            f"{self.box_blue_updated:.2f}" if self.box_blue_updated is not None else "",
             self.receipt_number,
             self.telegram_username,
             str(self.telegram_user_id),
             self.satispay_id or "",
-            format_datetime_for_sheet(self.created_at)
+            format_datetime_for_sheet(self.created_at),
+            self.sumup_id or ""
         ]
 
     @classmethod
@@ -90,16 +96,19 @@ class Transaction(BaseModel):
             "ID",
             "Data e Ora",
             "Metodo",
-            "Cassa Iniziale (€)",
+            "Cassa Rossa Iniziale (€)",
+            "Cassa Blu Iniziale (€)",
             "Descrizione",
             "Flusso",
             "Importo (€)",
-            "Cassa Aggiornata (€)",
+            "Cassa Rossa Aggiornata (€)",
+            "Cassa Blu Aggiornata (€)",
             "Numero Ricevuta",
             "Operatore",
             "Telegram ID",
             "ID Satispay",
-            "Data Registrazione"
+            "Data Registrazione",
+            "ID SumUp"
         ]
 
 
@@ -114,7 +123,8 @@ class CustomCommandDefaults(BaseModel):
     description: Optional[str] = None
     description_prefix: Optional[str] = None
     description_suffix: Optional[str] = None
-    box_money: Optional[float] = None
+    box_red: Optional[float] = None
+    box_blue: Optional[float] = None
 
 
 class CustomCommandConfig(BaseModel):
@@ -143,3 +153,23 @@ class SatispayPayment(BaseModel):
     @property
     def amount_euro(self) -> float:
         return self.amount_unit / 100.0
+
+
+class SumUpTransaction(BaseModel):
+    """
+    Modello per una transazione SumUp (storico transazioni del merchant)
+    """
+    id: Optional[str] = None
+    transaction_code: str
+    amount: float  # in euro
+    currency: str = "EUR"
+    status: str  # es: "SUCCESSFUL", "FAILED", "PENDING"
+    type: Optional[str] = None  # es: "PAYMENT", "REFUND"
+    payment_type: Optional[str] = None  # es: "POS", "ECOM"
+    card_type: Optional[str] = None
+    user: Optional[str] = None
+    timestamp: Optional[str] = None
+
+    @property
+    def amount_euro(self) -> float:
+        return self.amount

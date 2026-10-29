@@ -9,14 +9,20 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
 * **Sicurezza Chat Autorizzata**: Il bot risponde unicamente all'ID chat configurato nel file `.env`, ignorando ed isolando ogni comando proveniente da altre chat o utenti non autorizzati.
 * **Tag Esplicito dell'Utente nei Gruppi**: Il bot antepone a ogni domanda il tag diretto dell'utente (`👤 @username` o menzione diretta Telegram). In questo modo, anche se più membri interagiscono contemporaneamente nello stesso gruppo, è sempre evidente a colpo d'occhio chi deve rispondere.
 * **Procedura Guidata `/write` (shortcut `/w`)**:
-  * Richiede sequenzialmente: Data e Ora, Metodo (Contanti o Satispay), Cassa iniziale (o conferma saldo cassa attuale per Satispay), Descrizione, Flusso (Entrata/Uscita), Importo, Cassa aggiornata (solo se contanti, altrimenti allineata automaticamente) e Numero ricevuta.
+  * Richiede sequenzialmente: Data e Ora, Metodo (Contanti, Satispay o SumUp), conferma dei saldi di 🔴 Cassa Rossa e 🔵 Cassa Blu, Descrizione, Flusso (Entrata/Uscita), Importo, Cassa Blu aggiornata (solo se contanti, altrimenti i saldi restano invariati) e Numero ricevuta.
   * Interfaccia ottimizzata con **pulsanti interattivi (Inline Buttons)**:
     * Pulsante per impostare l'orario attuale (`/now`).
-    * Pulsante per selezionare l'ultimo saldo cassa registrato su Google Sheets.
-    * Calcolo automatico della cassa aggiornata (Saldo Iniziale ± Importo per contanti; saldo confermato per Satispay sia su colonna D che su colonna H) con pulsante di conferma rapida o inserimento manuale.
+    * Pulsante per confermare gli ultimi saldi di Cassa Rossa e Cassa Blu registrati su Google Sheets (oppure inserirli a mano nel formato `Rossa Blu`, es. `120 35,50`).
+    * Calcolo automatico del saldo aggiornato della Cassa Blu (Saldo Iniziale ± Importo per i contanti; per Satispay e SumUp i saldi restano invariati) con pulsante di conferma rapida o inserimento manuale.
     * Suggerimento progressivo per il numero di ricevuta (Ultimo registrato + 1).
   * Registra l'username e l'ID Telegram dell'operatore per audit e sicurezza.
   * Invia un riepilogo formattato in chat alla conclusione dell'inserimento.
+* **Doppia Cassa Contanti (🔴 Rossa / 🔵 Blu)**:
+  * **Cassa Rossa**: cassa principale. **Cassa Blu**: piccola cassa per il resto e per custodire l'incasso finché l'eccedenza non viene versata nella Rossa. Le transazioni in contanti entrano/escono sempre dalla Cassa Blu.
+  * Ogni riga del foglio registra i saldi iniziali e aggiornati di **entrambe** le casse (colonne D/E e I/J).
+  * `/cassa` (alias `/saldo`): mostra i saldi attuali di Rossa e Blu e il totale contanti.
+  * `/transfer` (alias `/tr`, `/trasferimento`): sposta contanti scegliendo la direzione (**Blu → Rossa** per versare l'eccedenza, **Rossa → Blu** per ricaricare il resto). Chiede conferma dei saldi e l'importo (che non può superare il saldo della cassa di origine) e registra una riga con metodo e flusso `Trasferimento`, senza ricevuta.
+  * **Migrazione automatica**: al primo avvio con un foglio nel vecchio layout (cassa unica) il bot inserisce le nuove colonne Blu. I vecchi saldi restano nella Cassa Rossa e la Blu parte da zero (puoi correggere i saldi al primo `/write`). **Fai una copia del foglio prima del primo avvio.**
 * **Archiviazione Cloud su Google Sheets**:
   * Struttura a colonne ordinata con autoincremento progressivo dell'ID transazione.
   * Formato date standardizzato: tutte le colonne temporali (*Data e Ora* e *Data Registrazione*) sono salvate in formato `GG/MM/AAAA HH:MM:SS` (`DD/MM/YYYY HH:MM:SS`).
@@ -39,6 +45,11 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
   * Invia l'immagine del codice QR con l'importo esatto: quando il cliente autorizza il pagamento sull'app, il bot lo rileva in tempo reale, completa la transazione e associa l'ID Satispay su Google Sheets in automatico!
   * È sempre disponibile il pulsante per saltare l'attesa del pagamento e procedere comunque con la registrazione manuale sul foglio.
 
+* **Integrazione SumUp (Polling + SQLite)**:
+  * Il bot interroga periodicamente lo storico transazioni SumUp (`SUMUP_API_KEY`), le salva in SQLite e notifica i nuovi incassi in chat, con Offline Catch-up come per Satispay.
+  * **Metodo SumUp in `/write`**: per le entrate il bot può attendere il pagamento sul terminale (**SumUp 3G+**) oppure generare un **QR con link di pagamento**. Il bot collega la prima transazione SumUp completata senza verificarne l'importo (sul foglio resta quello inserito) e il pulsante **Salta pagamento e registra** permette di proseguire senza ID SumUp (disattivabile con `SUMUP_QR_ENABLED=false`). A pagamento avvenuto il codice transazione viene scritto nella colonna P `ID SumUp` del foglio.
+  * **Comandi**: `/sumup_list [data]` (`/sul`), `/sumup_list_range <da> <a>` (`/sulr`), `/sumup_get <codice>` (`/sug`). `/link` e `/unlink` funzionano anche sulle notifiche SumUp.
+
 * **Macro e Comandi Personalizzati Dinamici**:
   * Cartella dedicata `custom_commands/`: aggiungi file `.yaml` per creare macro rapide (es. `/i`, `/bb`).
   * Registrazione automatica all'avvio nel menu dei comandi Telegram tramite `setMyCommands`.
@@ -60,12 +71,14 @@ GdG-Ledger-Bot/
 │   ├── handlers.py            # /start, /help, /link, /unlink, /sat_list, /sat_get
 │   └── keyboards.py           # Inline Keyboards e bottoni interattivi
 ├── core/
-│   ├── models.py              # Modelli dati Pydantic (Transaction, CustomCommand, SatispayPayment)
+│   ├── models.py              # Modelli dati Pydantic (Transaction, CustomCommand, SatispayPayment, SumUpTransaction)
+│   ├── qr.py                  # Generazione immagini QR code
 │   └── security.py            # Decoratori e filtri di autorizzazione chat
 ├── services/
 │   ├── db_service.py          # Database SQLite locale per storico pagamenti Satispay
 │   ├── sheets_service.py      # Servizio Google Sheets (gspread) e Mock locale
-│   └── satispay_service.py    # Client Satispay con HTTP Signatures e Polling
+│   ├── satispay_service.py    # Client Satispay con HTTP Signatures e Polling
+│   └── sumup_service.py       # Client SumUp: storico, polling, abbinamento importo, checkout
 ├── custom_commands/           # Cartella con le definizioni YAML dei comandi custom
 │   ├── iscrizione.yaml
 │   └── iscrizione_bayblade.yaml
@@ -75,6 +88,7 @@ GdG-Ledger-Bot/
 │   ├── test_bot_logic.py
 │   ├── test_custom_commands.py
 │   ├── test_satispay_service.py
+│   ├── test_sumup_service.py
 │   └── test_sheets_service.py
 ├── .env.example               # Template variabili d'ambiente (senza segreti)
 ├── .GEMINI.md                 # Guida dettagliata per ottenere credenziali API Google e Satispay
@@ -109,7 +123,7 @@ Modifica `.env` con i tuoi valori:
 * `TELEGRAM_BOT_TOKEN`: Il token del bot fornito da BotFather.
 * `TELEGRAM_ALLOWED_CHAT_ID`: L'ID numerico della chat o gruppo abilitato.
 * `USE_MOCK_SHEETS`: Lascia `true` per provare subito il bot in memoria locale senza credenziali Google, oppure `false` una volta configurato Google Sheets.
-* Per la guida completa all'ottenimento delle credenziali Google Sheets e Satispay, consulta il file [`.GEMINI.md`](.GEMINI.md).
+* Per la guida completa all'ottenimento delle credenziali Google Sheets e Satispay, consulta il file [`.GEMINI.md`](.GEMINI.md), che descrive anche le variabili `SUMUP_*` (tra cui `SUMUP_QR_ENABLED` per disattivare il QR SumUp).
 
 ### 4. Esecuzione dei Test
 Puoi verificare l'integrità dell'intero progetto eseguendo:

@@ -1,7 +1,7 @@
 import asyncio
 import html
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from telegram import Update
 from telegram.ext import (
@@ -12,24 +12,30 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
+from config import settings
+from core.qr import generate_qr_code_image
 from core.models import Transaction, CustomCommandConfig, format_datetime_for_sheet
 from core.security import is_chat_allowed
 from services.sheets_service import get_sheets_service
 from services.satispay_service import satispay_service
+from services.sumup_service import sumup_service
 from services.db_service import db_service
 from bot.keyboards import (
     get_now_keyboard,
     get_method_keyboard,
-    get_box_money_keyboard,
+    get_box_balances_keyboard,
+    get_transfer_direction_keyboard,
     get_flow_keyboard,
     get_box_updated_keyboard,
     get_receipt_keyboard,
     get_cancel_keyboard,
     get_qr_ask_keyboard,
     get_qr_waiting_keyboard,
+    get_sumup_ask_keyboard,
     CALLBACK_NOW,
     CALLBACK_METHOD_CASH,
     CALLBACK_METHOD_SATISPAY,
+    CALLBACK_METHOD_SUMUP,
     CALLBACK_FLOW_IN,
     CALLBACK_FLOW_OUT,
     CALLBACK_BOX_USE_LAST,
@@ -39,6 +45,10 @@ from bot.keyboards import (
     CALLBACK_CANCEL,
     CALLBACK_QR_GENERATE,
     CALLBACK_QR_SKIP,
+    CALLBACK_SUMUP_TERMINAL,
+    CALLBACK_SUMUP_LINK,
+    CALLBACK_TRANSFER_BLUE_TO_RED,
+    CALLBACK_TRANSFER_RED_TO_BLUE,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,7 +68,10 @@ active_conv_handler = None
     STATE_RECEIPT,
     STATE_QR_ASK,
     STATE_QR_WAITING,
-) = range(10)
+    STATE_SUMUP_ASK,
+    STATE_SUMUP_WAITING,
+    STATE_TRANSFER_DIRECTION,
+) = range(13)
 
 
 def get_user_mention(update: Update) -> str:
@@ -70,6 +83,17 @@ def get_user_mention(update: Update) -> str:
         return f"👤 @{html.escape(user.username)}"
     safe_name = html.escape(user.first_name or "Utente")
     return f'👤 <a href="tg://user?id={user.id}">{safe_name}</a>'
+
+
+def parse_two_amounts(text: str):
+    """Interpreta 'Rossa Blu' (es. '120 35,50' o '120/35.5') restituendo (rossa, blu) oppure None"""
+    parts = text.replace("€", " ").replace("/", " ").split()
+    if len(parts) != 2:
+        return None
+    try:
+        return float(parts[0].replace(",", ".")), float(parts[1].replace(",", "."))
+    except ValueError:
+        return None
 
 
 async def ack_callback_query(update: Update) -> None:
@@ -122,30 +146,50 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return STATE_METHOD
 
-    # 3. Cassa Iniziale / Conferma Saldo Cassa Attuale
-    if "box_money" not in data:
-        last_box = await asyncio.to_thread(sheets.get_last_box_money)
-        context.user_data["suggested_last_box"] = last_box
+    # 2b. Trasferimento: direzione (Blu → Rossa oppure Rossa → Blu)
+    is_transfer = data.get("kind") == "transfer"
+    if is_transfer and "transfer_direction" not in data:
+        await send_msg(
+            update,
+            "🔁 <b>Trasferimento di contanti:</b>\n"
+            "Da quale cassa a quale cassa vuoi spostare il denaro?",
+            reply_markup=get_transfer_direction_keyboard(),
+        )
+        return STATE_TRANSFER_DIRECTION
 
-        if data.get("method") == "Contanti":
-            prompt_title = "🪙 <b>Cassa iniziale (prima della transazione):</b>\n"
-            prompt_desc = (
-                f"Ultimo saldo contanti rilevato nel registro: <b>{last_box:.2f} €</b>\n\n"
-                "Premi il pulsante per confermarlo oppure scrivi l'importo manualmente."
-            )
+    # 3. Conferma saldi attuali di Cassa Rossa e Cassa Blu
+    if "box_red" not in data or "box_blue" not in data:
+        last_red, last_blue = await asyncio.to_thread(sheets.get_last_box_balances)
+        context.user_data["suggested_balances"] = (last_red, last_blue)
+
+        method = data.get("method")
+        if is_transfer:
+            prompt_title = "🪙 <b>Conferma saldi delle casse prima del trasferimento:</b>\n"
+        elif method == "Contanti":
+            prompt_title = "🪙 <b>Saldi delle casse (prima della transazione):</b>\n"
         else:
-            prompt_title = "🪙 <b>Conferma saldo cassa attuale:</b>\n"
-            prompt_desc = (
-                f"Ultimo saldo contanti rilevato nel registro: <b>{last_box:.2f} €</b>\n\n"
-                "Verifica e conferma il denaro presente in cassa al momento della transazione, "
-                "anche se il pagamento è effettuato tramite Satispay.\n"
-                "Premi il pulsante per confermarlo oppure scrivi l'importo manualmente."
+            prompt_title = "🪙 <b>Conferma saldi delle casse attuali:</b>\n"
+
+        if method == "Contanti":
+            cash_note = "Il contante di questa transazione entra/esce dalla 🔵 Cassa Blu.\n\n"
+        elif is_transfer:
+            cash_note = ""
+        else:
+            cash_note = (
+                f"Il pagamento è effettuato tramite {method}: il contante nelle casse non varia, "
+                "ma verifica comunque i saldi.\n\n"
             )
 
         await send_msg(
             update,
-            f"{prompt_title}{prompt_desc}",
-            reply_markup=get_box_money_keyboard(last_box),
+            f"{prompt_title}"
+            f"Ultimi saldi rilevati nel registro:\n"
+            f"🔴 <b>Cassa Rossa:</b> {last_red:.2f} €\n"
+            f"🔵 <b>Cassa Blu:</b> {last_blue:.2f} €\n\n"
+            f"{cash_note}"
+            "Premi il pulsante per confermarli oppure scrivi i due importi nel formato "
+            "<code>Rossa Blu</code> (es. <code>120 35,50</code>).",
+            reply_markup=get_box_balances_keyboard(last_red, last_blue),
         )
         return STATE_BOX_BEFORE
 
@@ -191,30 +235,44 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return STATE_AMOUNT
 
-    # 7. Cassa Aggiornata (solo se Contanti, altrimenti allineata a cassa attuale)
-    if "box_money_updated" not in data:
-        if data.get("method") == "Contanti":
-            box_init = data.get("box_money", 0.0)
-            amount = data.get("amount", 0.0)
+    # 7. Saldi aggiornati delle casse
+    if "box_blue_updated" not in data:
+        red_init = data.get("box_red", 0.0)
+        blue_init = data.get("box_blue", 0.0)
+        amount = data.get("amount", 0.0)
+        method = data.get("method")
+
+        if is_transfer:
+            if data.get("transfer_direction") == "blue_to_red":
+                data["box_red_updated"] = red_init + amount
+                data["box_blue_updated"] = blue_init - amount
+            else:
+                data["box_red_updated"] = red_init - amount
+                data["box_blue_updated"] = blue_init + amount
+        elif method == "Contanti":
+            # Il contante delle transazioni entra/esce sempre dalla Cassa Blu
+            data["box_red_updated"] = red_init
             flow = data.get("flow", "Entrata")
-            calc_box = box_init + amount if flow == "Entrata" else box_init - amount
-            context.user_data["suggested_box_after"] = calc_box
+            calc_blue = blue_init + amount if flow == "Entrata" else blue_init - amount
+            context.user_data["suggested_box_after"] = calc_blue
 
             sign = "+" if flow == "Entrata" else "-"
             await send_msg(
                 update,
-                f"🪙 <b>Cassa aggiornata (dopo la transazione):</b>\n"
-                f"Saldo calcolato: <b>{calc_box:.2f} €</b> ({box_init:.2f} € {sign} {amount:.2f} €)\n\n"
+                f"🔵 <b>Cassa Blu aggiornata (dopo la transazione):</b>\n"
+                f"Saldo calcolato: <b>{calc_blue:.2f} €</b> ({blue_init:.2f} € {sign} {amount:.2f} €)\n"
+                f"🔴 Cassa Rossa invariata: {red_init:.2f} €\n\n"
                 "Premi il pulsante per confermare il saldo calcolato oppure scrivi il valore reale se differisce.",
-                reply_markup=get_box_updated_keyboard(calc_box),
+                reply_markup=get_box_updated_keyboard(calc_blue),
             )
             return STATE_BOX_AFTER
         else:
-            # Per Satispay il denaro in cassa non varia; la cassa aggiornata (Colonna H) coincide con la cassa iniziale (Colonna D)
-            data["box_money_updated"] = data.get("box_money", 0.0)
+            # Per i metodi digitali (Satispay/SumUp) il contante nelle casse non varia
+            data["box_red_updated"] = red_init
+            data["box_blue_updated"] = blue_init
 
     # 8. Numero Ricevuta
-    if "receipt_number" not in data:
+    if "receipt_number" not in data and not is_transfer:
         last_receipt = await asyncio.to_thread(sheets.get_last_receipt_number)
         suggested_receipt = last_receipt + 1
         context.user_data["suggested_receipt"] = suggested_receipt
@@ -245,6 +303,29 @@ async def advance_or_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return STATE_QR_ASK
 
+    # 9b. Se Metodo è SumUp ed è un'Entrata (+), chiedi come incassare (terminale o link/QR)
+    if (
+        data.get("method") == "SumUp"
+        and data.get("flow") == "Entrata"
+        and "sumup_choice_done" not in data
+    ):
+        amount = data.get("amount", 0.0)
+        qr_enabled = settings.SUMUP_QR_ENABLED
+        link_line = (
+            "• Se premi <b>🔗 Genera QR link di pagamento</b>, verrà mostrato un QR code con la pagina di pagamento SumUp.\n"
+            if qr_enabled else ""
+        )
+        await send_msg(
+            update,
+            f"💳 <b>Pagamento SumUp</b>\n"
+            f"Come vuoi incassare <b>{amount:.2f} €</b>?\n\n"
+            "• Se premi <b>💳 Attendi pagamento su terminale</b>, esegui il pagamento sul SumUp 3G+: il bot collegherà la prima transazione completata (l'importo non viene verificato).\n"
+            f"{link_line}"
+            "• Se premi <b>⏩ Salta e registra subito</b>, la transazione verrà registrata subito nel foglio senza attendere il pagamento.",
+            reply_markup=get_sumup_ask_keyboard(qr_enabled),
+        )
+        return STATE_SUMUP_ASK
+
     return await finalize_and_save_transaction(update, context)
 
 
@@ -263,25 +344,29 @@ async def finalize_and_save_transaction(update: Update, context: ContextTypes.DE
     username = user.username or user.full_name or "Anonimo"
     user_id = user.id
 
-    # Per Satispay, allinea cassa iniziale e cassa aggiornata al saldo confermato
-    if data.get("method") == "Satispay":
-        if data.get("box_money_updated") is None and data.get("box_money") is not None:
-            data["box_money_updated"] = data.get("box_money")
-        elif data.get("box_money") is None and data.get("box_money_updated") is not None:
-            data["box_money"] = data.get("box_money_updated")
+    # Per i metodi digitali, i saldi aggiornati coincidono con quelli confermati
+    if data.get("method") in ("Satispay", "SumUp"):
+        for key in ("red", "blue"):
+            if data.get(f"box_{key}_updated") is None and data.get(f"box_{key}") is not None:
+                data[f"box_{key}_updated"] = data[f"box_{key}"]
+            elif data.get(f"box_{key}") is None and data.get(f"box_{key}_updated") is not None:
+                data[f"box_{key}"] = data[f"box_{key}_updated"]
 
     tx = Transaction(
         date_time=data["date_time"],
         method=data["method"],
-        box_money=data.get("box_money"),
+        box_red=data.get("box_red"),
+        box_blue=data.get("box_blue"),
         description=data["description"],
         flow=data["flow"],
         amount=data["amount"],
-        box_money_updated=data.get("box_money_updated"),
+        box_red_updated=data.get("box_red_updated"),
+        box_blue_updated=data.get("box_blue_updated"),
         receipt_number=data.get("receipt_number", 0),
         telegram_username=username,
         telegram_user_id=user_id,
         satispay_id=data.get("satispay_id"),
+        sumup_id=data.get("sumup_id"),
     )
 
     try:
@@ -296,27 +381,32 @@ async def finalize_and_save_transaction(update: Update, context: ContextTypes.DE
         return ConversationHandler.END
 
     # Messaggio riepilogo inviato in chat
-    box_info = ""
-    if registered_tx.method == "Contanti":
-        b_init = f"{registered_tx.box_money:.2f} €" if registered_tx.box_money is not None else "-"
-        b_upd = f"{registered_tx.box_money_updated:.2f} €" if registered_tx.box_money_updated is not None else "-"
-        box_info = f"🪙 <b>Cassa iniziale:</b> <code>{b_init}</code>\n🪙 <b>Cassa aggiornata:</b> <code>{b_upd}</code>\n"
-    elif registered_tx.box_money is not None:
-        b_val = f"{registered_tx.box_money:.2f} €"
-        box_info = f"🪙 <b>Cassa attuale confermata:</b> <code>{b_val}</code>\n"
+    def _fmt(value) -> str:
+        return f"{value:.2f} €" if value is not None else "-"
+
+    box_info = (
+        f"🔴 <b>Cassa Rossa:</b> <code>{_fmt(registered_tx.box_red)} → {_fmt(registered_tx.box_red_updated)}</code>\n"
+        f"🔵 <b>Cassa Blu:</b> <code>{_fmt(registered_tx.box_blue)} → {_fmt(registered_tx.box_blue_updated)}</code>\n"
+    )
 
     sat_info = ""
     if registered_tx.satispay_id:
         sat_info = f"📱 <b>ID Satispay Collegato:</b> <code>{html.escape(registered_tx.satispay_id)}</code>\n"
 
-    flow_emoji = "➕" if registered_tx.flow == "Entrata" else "➖"
-    method_emoji = "💵" if registered_tx.method == "Contanti" else "📱"
+    if registered_tx.sumup_id:
+        sat_info += f"💳 <b>ID SumUp Collegato:</b> <code>{html.escape(registered_tx.sumup_id)}</code>\n"
+
+    is_transfer_tx = registered_tx.method == "Trasferimento"
+    flow_emoji = {"Entrata": "➕", "Uscita": "➖"}.get(registered_tx.flow, "🔁")
+    method_emoji = {"Contanti": "💵", "SumUp": "💳", "Trasferimento": "🔁"}.get(registered_tx.method, "📱")
+    title = "✅ <b>Trasferimento Registrato con Successo!</b>" if is_transfer_tx else "✅ <b>Transazione Registrata con Successo!</b>"
+    receipt_line = "" if is_transfer_tx else f"🧾 <b>Ricevuta:</b> <code>#{registered_tx.receipt_number}</code>\n"
 
     esc_desc = html.escape(registered_tx.description)
     esc_user = html.escape(registered_tx.telegram_username)
 
     summary = (
-        "✅ <b>Transazione Registrata con Successo!</b>\n\n"
+        f"{title}\n\n"
         f"🆔 <b>ID Transazione:</b> <code>#{registered_tx.id}</code>\n"
         f"📅 <b>Data:</b> <code>{html.escape(registered_tx.date_time)}</code>\n"
         f"{method_emoji} <b>Metodo:</b> <code>{html.escape(registered_tx.method)}</code>\n"
@@ -325,7 +415,7 @@ async def finalize_and_save_transaction(update: Update, context: ContextTypes.DE
         f"💰 <b>Importo:</b> <code>{registered_tx.amount:.2f} €</code>\n"
         f"{box_info}"
         f"{sat_info}"
-        f"🧾 <b>Ricevuta:</b> <code>#{registered_tx.receipt_number}</code>\n"
+        f"{receipt_line}"
         f"👤 <b>Registrato da:</b> @{esc_user} (<code>{registered_tx.telegram_user_id}</code>)"
     )
 
@@ -347,6 +437,22 @@ async def start_write(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     context.user_data.clear()
     context.user_data["tx_data"] = {}
+    return await advance_or_finish(update, context)
+
+
+async def start_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Avvia il trasferimento di contanti tra Cassa Rossa e Cassa Blu (/transfer)"""
+    if not update.effective_chat or not is_chat_allowed(update.effective_chat.id):
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    context.user_data["tx_data"] = {
+        "kind": "transfer",
+        "date_time": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "method": "Trasferimento",
+        "flow": "Trasferimento",
+        "receipt_number": 0,
+    }
     return await advance_or_finish(update, context)
 
 
@@ -390,10 +496,10 @@ def make_custom_command_starter(config: CustomCommandConfig):
             context.user_data["desc_suffix"] = defaults.description_suffix
 
         # Pre-compila cassa
-        if defaults.box_money is not None:
-            data["box_money"] = float(defaults.box_money)
-            if defaults.method == "Satispay":
-                data["box_money_updated"] = float(defaults.box_money)
+        if defaults.box_red is not None:
+            data["box_red"] = float(defaults.box_red)
+        if defaults.box_blue is not None:
+            data["box_blue"] = float(defaults.box_blue)
 
         context.user_data["tx_data"] = data
         return await advance_or_finish(update, context)
@@ -440,10 +546,16 @@ async def handle_method_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         if query_data == CALLBACK_METHOD_SATISPAY:
             data["method"] = "Satispay"
             return await advance_or_finish(update, context)
+        if query_data == CALLBACK_METHOD_SUMUP:
+            data["method"] = "SumUp"
+            return await advance_or_finish(update, context)
 
     text = update.message.text.strip().lower() if update.message else ""
     if text == "/cancel":
         return await handle_cancel(update, context)
+    if "sumup" in text or "carta" in text or "pos" in text:
+        data["method"] = "SumUp"
+        return await advance_or_finish(update, context)
     if "contant" in text or "cash" in text:
         data["method"] = "Contanti"
         return await advance_or_finish(update, context)
@@ -451,12 +563,12 @@ async def handle_method_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         data["method"] = "Satispay"
         return await advance_or_finish(update, context)
 
-    await send_msg(update, "⚠️ Scelta non valida. Premi uno dei pulsanti o digita <b>Contanti</b> o <b>Satispay</b>.")
+    await send_msg(update, "⚠️ Scelta non valida. Premi uno dei pulsanti o digita <b>Contanti</b>, <b>Satispay</b> o <b>SumUp</b>.")
     return STATE_METHOD
 
 
 async def handle_box_before_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Gestisce l'inserimento o conferma della cassa iniziale"""
+    """Gestisce la conferma o l'inserimento manuale dei saldi di Cassa Rossa e Cassa Blu"""
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
@@ -465,20 +577,59 @@ async def handle_box_before_input(update: Update, context: ContextTypes.DEFAULT_
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
         if query_data == CALLBACK_BOX_USE_LAST:
-            data["box_money"] = context.user_data.get("suggested_last_box", 0.0)
+            red, blue = context.user_data.get("suggested_balances", (0.0, 0.0))
+            data["box_red"], data["box_blue"] = red, blue
             return await advance_or_finish(update, context)
 
     text = update.message.text.strip() if update.message else ""
     if text == "/cancel":
         return await handle_cancel(update, context)
 
-    try:
-        val = float(text.replace("€", "").replace(",", ".").strip())
-        data["box_money"] = val
-        return await advance_or_finish(update, context)
-    except ValueError:
-        await send_msg(update, "⚠️ Inserisci una cifra numerica valida per la cassa (es: <code>50.00</code>).")
+    parsed = parse_two_amounts(text)
+    if parsed is None:
+        await send_msg(
+            update,
+            "⚠️ Inserisci i saldi di 🔴 Rossa e 🔵 Blu nel formato <code>Rossa Blu</code> (es: <code>120 35,50</code>).",
+        )
         return STATE_BOX_BEFORE
+    data["box_red"], data["box_blue"] = parsed
+    return await advance_or_finish(update, context)
+
+
+async def handle_transfer_direction_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Gestisce la scelta della direzione del trasferimento"""
+    data = context.user_data.setdefault("tx_data", {})
+    direction = None
+
+    if update.callback_query:
+        await ack_callback_query(update)
+        query_data = update.callback_query.data
+        if query_data == CALLBACK_CANCEL:
+            return await handle_cancel(update, context)
+        if query_data == CALLBACK_TRANSFER_BLUE_TO_RED:
+            direction = "blue_to_red"
+        elif query_data == CALLBACK_TRANSFER_RED_TO_BLUE:
+            direction = "red_to_blue"
+    else:
+        text = update.message.text.strip().lower() if update.message else ""
+        if text == "/cancel":
+            return await handle_cancel(update, context)
+        # Accetta ad esempio "blu rossa" / "blu -> rossa" (origine prima della destinazione)
+        blue_pos, red_pos = text.find("blu"), text.find("ross")
+        if blue_pos != -1 and red_pos != -1:
+            direction = "blue_to_red" if blue_pos < red_pos else "red_to_blue"
+
+    if direction is None:
+        await send_msg(
+            update,
+            "⚠️ Scegli la direzione del trasferimento con i pulsanti.",
+            reply_markup=get_transfer_direction_keyboard(),
+        )
+        return STATE_TRANSFER_DIRECTION
+
+    data["transfer_direction"] = direction
+    data["description"] = "Trasferimento Blu → Rossa" if direction == "blue_to_red" else "Trasferimento Rossa → Blu"
+    return await advance_or_finish(update, context)
 
 
 async def handle_description_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -538,6 +689,16 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         if val <= 0:
             await send_msg(update, "⚠️ L'importo deve essere maggiore di zero.")
             return STATE_AMOUNT
+        if data.get("kind") == "transfer":
+            from_red = data.get("transfer_direction") == "red_to_blue"
+            source_balance = data.get("box_red" if from_red else "box_blue", 0.0)
+            if val > source_balance + 1e-9:
+                source_name = "🔴 Rossa" if from_red else "🔵 Blu"
+                await send_msg(
+                    update,
+                    f"⚠️ Saldo insufficiente nella Cassa {source_name} ({source_balance:.2f} €). Inserisci un importo minore.",
+                )
+                return STATE_AMOUNT
         data["amount"] = val
         return await advance_or_finish(update, context)
     except ValueError:
@@ -546,7 +707,7 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_box_after_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Gestisce la conferma o inserimento manuale della cassa aggiornata"""
+    """Gestisce la conferma o inserimento manuale del saldo aggiornato della Cassa Blu"""
     data = context.user_data.setdefault("tx_data", {})
 
     if update.callback_query:
@@ -555,7 +716,7 @@ async def handle_box_after_input(update: Update, context: ContextTypes.DEFAULT_T
         if query_data == CALLBACK_CANCEL:
             return await handle_cancel(update, context)
         if query_data == CALLBACK_BOX_CONFIRM_CALCULATED:
-            data["box_money_updated"] = context.user_data.get("suggested_box_after", 0.0)
+            data["box_blue_updated"] = context.user_data.get("suggested_box_after", 0.0)
             return await advance_or_finish(update, context)
 
     text = update.message.text.strip() if update.message else ""
@@ -564,10 +725,10 @@ async def handle_box_after_input(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         val = float(text.replace("€", "").replace(",", ".").strip())
-        data["box_money_updated"] = val
+        data["box_blue_updated"] = val
         return await advance_or_finish(update, context)
     except ValueError:
-        await send_msg(update, "⚠️ Inserisci un importo valido per la cassa aggiornata.")
+        await send_msg(update, "⚠️ Inserisci un importo valido per la Cassa Blu aggiornata.")
         return STATE_BOX_AFTER
 
 
@@ -780,11 +941,195 @@ async def handle_qr_waiting_input(update: Update, context: ContextTypes.DEFAULT_
 
     await send_msg(
         update,
-        "⏳ <b>In attesa del pagamento tramite app Satispay...</b>\n"
+        "⏳ <b>In attesa del pagamento...</b>\n"
         "Premi <b>⏩ Salta pagamento e registra</b> per procedere subito o <b>❌ Annulla operazione</b> per terminare.",
         reply_markup=get_qr_waiting_keyboard()
     )
     return STATE_QR_WAITING
+
+
+async def handle_sumup_ask_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Gestisce la scelta di incasso SumUp: terminale, link/QR (se abilitato) oppure salta"""
+    data = context.user_data.setdefault("tx_data", {})
+    qr_enabled = settings.SUMUP_QR_ENABLED
+
+    if update.callback_query:
+        await ack_callback_query(update)
+        query_data = update.callback_query.data
+        if query_data == CALLBACK_CANCEL:
+            return await handle_cancel(update, context)
+        if query_data == CALLBACK_QR_SKIP:
+            data["sumup_choice_done"] = True
+            return await advance_or_finish(update, context)
+        if query_data == CALLBACK_SUMUP_TERMINAL:
+            return await start_sumup_terminal_wait(update, context)
+        if query_data == CALLBACK_SUMUP_LINK and qr_enabled:
+            return await start_sumup_link_flow(update, context)
+    else:
+        text = update.message.text.strip().lower() if update.message else ""
+        if text == "/cancel":
+            return await handle_cancel(update, context)
+        if "salta" in text or "skip" in text:
+            data["sumup_choice_done"] = True
+            return await advance_or_finish(update, context)
+        if "termin" in text or "pos" in text:
+            return await start_sumup_terminal_wait(update, context)
+        if qr_enabled and ("qr" in text or "link" in text):
+            return await start_sumup_link_flow(update, context)
+
+    await send_msg(
+        update,
+        "⚠️ Scegli un'opzione usando i pulsanti sottostanti.",
+        reply_markup=get_sumup_ask_keyboard(qr_enabled),
+    )
+    return STATE_SUMUP_ASK
+
+
+async def start_sumup_terminal_wait(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Attende un pagamento con lo stesso importo sul terminale SumUp e lo collega alla transazione"""
+    data = context.user_data.setdefault("tx_data", {})
+    data["sumup_choice_done"] = True
+
+    if not sumup_service.is_configured:
+        await send_msg(update, "⚠️ <b>SumUp non è configurato (SUMUP_API_KEY mancante).</b> Registro la transazione normalmente...")
+        return await advance_or_finish(update, context)
+
+    amount = data.get("amount", 0.0)
+    since = datetime.now(timezone.utc)
+    claimed = context.application.bot_data.setdefault("sumup_claimed_codes", set())
+
+    async def check():
+        match = await sumup_service.find_new_payment(since, exclude_codes=claimed)
+        if match:
+            claimed.add(match.transaction_code)
+            return ("PAID", match.transaction_code)
+        return None
+
+    await send_msg(
+        update,
+        f"💳 <b>Esegui il pagamento di {amount:.2f} € sul terminale SumUp 3G+.</b>\n"
+        "⏳ <i>In attesa del pagamento...</i>\n\n"
+        "💡 Il bot collegherà la prima transazione SumUp completata, senza verificarne l'importo "
+        "(sul foglio resta quello inserito).\n"
+        "Se il pagamento non viene rilevato, premi <b>⏩ Salta pagamento e registra</b>: "
+        "la transazione verrà registrata senza ID SumUp.",
+        reply_markup=get_qr_waiting_keyboard(),
+    )
+    _spawn_sumup_wait(update, context, check, amount)
+    return STATE_SUMUP_WAITING
+
+
+async def start_sumup_link_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Crea un checkout SumUp con link di pagamento, mostra il QR e attende il pagamento"""
+    data = context.user_data.setdefault("tx_data", {})
+    data["sumup_choice_done"] = True
+
+    amount = data.get("amount", 0.0)
+    base_desc = (data.get("description") or "Transazione").strip()
+    receipt_num = data.get("receipt_number", 0)
+    receipt_str = str(receipt_num) if receipt_num and receipt_num > 0 else "-"
+
+    await send_msg(update, "⏳ <i>Contatto SumUp per generare il link di pagamento...</i>")
+    checkout = await sumup_service.create_hosted_checkout(amount, description=f"{base_desc} - {receipt_str}")
+    if not checkout:
+        await send_msg(
+            update,
+            "⚠️ <b>Impossibile generare il link di pagamento SumUp.</b> Registro la transazione normalmente sul foglio...",
+        )
+        return await advance_or_finish(update, context)
+
+    checkout_id = checkout["id"]
+    url = checkout["hosted_checkout_url"]
+    qr_buffer = generate_qr_code_image(url)
+
+    caption = (
+        f"{get_user_mention(update)}\n"
+        f"📲 <b>Inquadra il QR per pagare {amount:.2f} € con carta!</b>\n\n"
+        f"🔗 {html.escape(url)}\n"
+        "⏳ <i>In attesa del pagamento...</i>\n\n"
+        "💡 La transazione verrà registrata e collegata in automatico a pagamento avvenuto.\n"
+        "Se il pagamento non viene rilevato, premi <b>⏩ Salta pagamento e registra</b>: "
+        "la transazione verrà registrata senza ID SumUp."
+    )
+    await update.effective_chat.send_photo(
+        photo=qr_buffer, caption=caption, parse_mode="HTML", reply_markup=get_qr_waiting_keyboard()
+    )
+
+    async def check():
+        checkout_data = await sumup_service.get_checkout(checkout_id)
+        return sumup_service.checkout_result(checkout_data) if checkout_data else None
+
+    _spawn_sumup_wait(update, context, check, amount)
+    return STATE_SUMUP_WAITING
+
+
+def _spawn_sumup_wait(update: Update, context: ContextTypes.DEFAULT_TYPE, check_fn, amount: float) -> None:
+    asyncio.create_task(
+        wait_for_sumup_payment(
+            chat_id=update.effective_chat.id,
+            check_fn=check_fn,
+            amount=amount,
+            context=context,
+            update=update,
+        )
+    )
+
+
+async def wait_for_sumup_payment(chat_id: int, check_fn, amount: float, context: ContextTypes.DEFAULT_TYPE, update: Update):
+    """
+    Loop di attesa asincrono: controlla ogni 4 secondi l'esito del pagamento SumUp tramite check_fn,
+    che restituisce ("PAID", codice), ("FAILED", stato) oppure None se ancora in attesa.
+    """
+    attempts = max(1, settings.SUMUP_WAIT_TIMEOUT // 4)
+    for _ in range(attempts):
+        await asyncio.sleep(4)
+
+        if context.user_data.get("qr_cancelled") or context.user_data.get("qr_skipped"):
+            logger.info("Attesa pagamento SumUp interrotta dall'utente.")
+            return
+
+        try:
+            result = await check_fn()
+        except Exception as e:
+            logger.error(f"Errore durante verifica pagamento SumUp: {e}")
+            continue
+
+        if not result:
+            continue
+
+        outcome, value = result
+        if outcome == "PAID":
+            logger.info(f"Pagamento SumUp ricevuto: {value}")
+            if value:
+                context.user_data.setdefault("tx_data", {})["sumup_id"] = value
+                # Salva in SQLite per evitare notifiche doppie dal polling generale
+                tx = await sumup_service.get_transaction(value)
+                if tx:
+                    db_service.save_sumup_transaction(tx)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ <b>Pagamento SumUp ricevuto e collegato</b> (codice <code>{html.escape(str(value))}</code>).",
+                parse_mode="HTML",
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ <b>Il pagamento SumUp è risultato: {html.escape(str(value))}.</b> Procedo con la registrazione della transazione sul foglio...",
+                parse_mode="HTML",
+            )
+        try:
+            await finalize_and_save_transaction(update, context)
+        except Exception as ex:
+            logger.error(f"Errore durante finalizzazione transazione SumUp: {ex}")
+        return
+
+    if not context.user_data.get("qr_cancelled") and not context.user_data.get("qr_skipped"):
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏳ <b>Tempo scaduto per il pagamento SumUp.</b> Procedo con la registrazione sul foglio senza collegamento automatico...",
+            parse_mode="HTML",
+        )
+        await finalize_and_save_transaction(update, context)
 
 
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -798,6 +1143,7 @@ def build_conversation_handler(custom_commands: Optional[Dict[str, CustomCommand
     """Costruisce il ConversationHandler registrando i comandi base e tutte le macro custom"""
     entry_points = [
         CommandHandler(["write", "w"], start_write),
+        CommandHandler(["transfer", "trasferimento", "tr"], start_transfer),
     ]
 
     if custom_commands:
@@ -815,6 +1161,10 @@ def build_conversation_handler(custom_commands: Optional[Dict[str, CustomCommand
         STATE_METHOD: [
             CallbackQueryHandler(handle_method_input),
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_method_input),
+        ],
+        STATE_TRANSFER_DIRECTION: [
+            CallbackQueryHandler(handle_transfer_direction_input),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_transfer_direction_input),
         ],
         STATE_BOX_BEFORE: [
             CallbackQueryHandler(handle_box_before_input),
@@ -845,6 +1195,14 @@ def build_conversation_handler(custom_commands: Optional[Dict[str, CustomCommand
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_qr_ask_input),
         ],
         STATE_QR_WAITING: [
+            CallbackQueryHandler(handle_qr_waiting_input),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_qr_waiting_input),
+        ],
+        STATE_SUMUP_ASK: [
+            CallbackQueryHandler(handle_sumup_ask_input),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sumup_ask_input),
+        ],
+        STATE_SUMUP_WAITING: [
             CallbackQueryHandler(handle_qr_waiting_input),
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_qr_waiting_input),
         ],

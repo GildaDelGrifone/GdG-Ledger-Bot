@@ -72,9 +72,14 @@ def build_bot_commands_list(custom_commands: Dict[str, CustomCommandConfig]) -> 
     commands = [
         BotCommand("write", "Registra nuova transazione nel foglio"),
         BotCommand("w", "Scorciatoia per /write"),
+        BotCommand("transfer", "Sposta contanti tra Cassa Rossa e Cassa Blu"),
+        BotCommand("cassa", "Mostra i saldi di Cassa Rossa e Cassa Blu"),
         BotCommand("sat_list", "Elenco transazioni Satispay per data"),
         BotCommand("sat_list_range", "Elenco transazioni Satispay per intervallo"),
         BotCommand("sat_get", "Richiama notifica Satispay dato ID"),
+        BotCommand("sumup_list", "Elenco transazioni SumUp per data"),
+        BotCommand("sumup_list_range", "Elenco transazioni SumUp per intervallo"),
+        BotCommand("sumup_get", "Richiama notifica SumUp dato codice"),
         BotCommand("cancel", "Annulla operazione in corso"),
         BotCommand("help", "Mostra istruzioni e comandi disponibili"),
     ]
