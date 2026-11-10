@@ -168,6 +168,7 @@ class SumUpTransaction(BaseModel):
     type: Optional[str] = None  # es: "PAYMENT", "REFUND"
     payment_type: Optional[str] = None  # es: "POS", "ECOM"
     card_type: Optional[str] = None
+    card_last4: Optional[str] = None  # ultime 4 cifre della carta (solo da API, non salvate nel DB)
     user: Optional[str] = None
     timestamp: Optional[str] = None
 

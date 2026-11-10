@@ -50,6 +50,10 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
   * **Metodo SumUp in `/write`**: per le entrate il bot può attendere il pagamento sul terminale (**SumUp 3G+**) oppure generare un **QR con link di pagamento**. Il bot collega la prima transazione SumUp completata senza verificarne l'importo (sul foglio resta quello inserito) e il pulsante **Salta pagamento e registra** permette di proseguire senza ID SumUp (disattivabile con `SUMUP_QR_ENABLED=false`). A pagamento avvenuto il codice transazione viene scritto nella colonna P `ID SumUp` del foglio.
   * **Comandi**: `/sumup_list [data]` (`/sul`), `/sumup_list_range <da> <a>` (`/sulr`), `/sumup_get <codice>` (`/sug`). `/link` e `/unlink` funzionano anche sulle notifiche SumUp.
 
+* **Dashboard e dettagli dei pagamenti**: sotto ogni notifica e ai risultati di `/sat_get` e `/sumup_get` ci sono due pulsanti:
+  * 🌐 **Dashboard Satispay** (apre il pagamento su `dashboard.satispay.com`, richiede login) oppure 🧾 **Ricevuta SumUp** (ricevuta pubblica su `sales-receipt.sumup.com`, senza login);
+  * 🔍 **Dettagli**: recupera la transazione aggiornata dalle API e risponde alla notifica con stato, importo, carta usata (tipo e ultime 4 cifre per SumUp), operatore e data.
+
 * **Macro e Comandi Personalizzati Dinamici**:
   * Cartella dedicata `custom_commands/`: aggiungi file `.yaml` per creare macro rapide (es. `/i`, `/bb`).
   * Registrazione automatica all'avvio nel menu dei comandi Telegram tramite `setMyCommands`.
@@ -72,10 +76,10 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
 | `/unlink [id_transazione]` | Rispondendo a una notifica, rimuove l'ID dal foglio (da tutte le righe o da una sola) |
 | `/sat_list [data]` (`/sl`) | Pagamenti Satispay di una data (oggi se omessa) |
 | `/sat_list_range <da> <a>` (`/slr`) | Pagamenti Satispay in un intervallo |
-| `/sat_get <ID>` (`/sg`) | Rievoca la notifica di un pagamento Satispay |
+| `/sat_get <ID>` (`/sg`) | Rievoca la notifica di un pagamento Satispay (con pulsanti Dashboard e Dettagli) |
 | `/sumup_list [data]` (`/sul`) | Transazioni SumUp di una data (oggi se omessa) |
 | `/sumup_list_range <da> <a>` (`/sulr`) | Transazioni SumUp in un intervallo |
-| `/sumup_get <codice>` (`/sug`) | Rievoca la notifica di una transazione SumUp |
+| `/sumup_get <codice>` (`/sug`) | Rievoca la notifica di una transazione SumUp (con pulsanti Ricevuta e Dettagli) |
 | `/cancel` | Annulla l'operazione in corso |
 | `/start`, `/help` | Benvenuto e guida (con le macro disponibili) |
 | Macro da `custom_commands/` | Es. `/i`, `/bb`, `/r` |

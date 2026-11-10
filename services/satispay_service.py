@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from typing import Optional, Dict, Any, List
+from urllib.parse import quote
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -12,6 +13,9 @@ from core.models import SatispayPayment
 from core.qr import generate_qr_code_image
 
 logger = logging.getLogger(__name__)
+
+# Pagina del singolo pagamento nella dashboard Satispay Business (richiede login)
+SATISPAY_DASHBOARD_URL = "https://dashboard.satispay.com/dashboard/transactions/{id}"
 
 
 class SatispayService:
@@ -80,11 +84,16 @@ class SatispayService:
             "Authorization": auth_header_value
         }
 
-    async def get_payment(self, payment_id: str) -> Optional[SatispayPayment]:
+    @staticmethod
+    def dashboard_url(payment_id: str) -> str:
+        """Link alla pagina del pagamento nella dashboard Satispay Business (richiede login)"""
+        return SATISPAY_DASHBOARD_URL.format(id=quote(payment_id, safe=""))
+
+    async def get_payment_raw(self, payment_id: str) -> Optional[Dict[str, Any]]:
         """
-        Recupera i dettagli di un pagamento tramite API Satispay
+        Recupera il JSON completo di un pagamento tramite API Satispay
         """
-        path = f"/g_business/v1/payments/{payment_id}"
+        path = f"/g_business/v1/payments/{quote(payment_id, safe='')}"
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json"
@@ -98,29 +107,35 @@ class SatispayService:
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, headers=headers, timeout=10.0)
-                if res.status_code == 200:
-                    data = res.json()
-                    return SatispayPayment(
-                        id=data.get("id", payment_id),
-                        amount_unit=data.get("amount_unit", 0),
-                        currency=data.get("currency", "EUR"),
-                        status=data.get("status", "UNKNOWN"),
-                        flow=data.get("flow"),
-                        type=data.get("type"),
-                        sender_name=(
-                            (data.get("sender", {}).get("name") if isinstance(data.get("sender"), dict) else None)
-                            or data.get("sender_value")
-                            or data.get("consumer_name")
-                        ),
-                        comment=data.get("comment"),
-                        insert_date=data.get("insert_date")
-                    )
-                else:
-                    logger.error(f"Errore chiamata Satispay GET payment ({res.status_code}): {res.text}")
-                    return None
+            if res.status_code == 200:
+                return res.json()
+            logger.error(f"Errore chiamata Satispay GET payment ({res.status_code}): {res.text}")
         except Exception as e:
             logger.error(f"Eccezione durante chiamata Satispay: {e}")
+        return None
+
+    async def get_payment(self, payment_id: str) -> Optional[SatispayPayment]:
+        """
+        Recupera i dettagli di un pagamento tramite API Satispay
+        """
+        data = await self.get_payment_raw(payment_id)
+        if data is None:
             return None
+        return SatispayPayment(
+            id=data.get("id", payment_id),
+            amount_unit=data.get("amount_unit", 0),
+            currency=data.get("currency", "EUR"),
+            status=data.get("status", "UNKNOWN"),
+            flow=data.get("flow"),
+            type=data.get("type"),
+            sender_name=(
+                (data.get("sender", {}).get("name") if isinstance(data.get("sender"), dict) else None)
+                or data.get("sender_value")
+                or data.get("consumer_name")
+            ),
+            comment=data.get("comment"),
+            insert_date=data.get("insert_date")
+        )
 
     async def create_payment(self, amount_unit: int, description: str = "") -> Optional[Dict[str, Any]]:
         """
