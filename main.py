@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -31,7 +32,10 @@ from bot.handlers import (
     error_handler,
     format_satispay_echo,
     format_sumup_echo,
+    build_payment_links_keyboard,
+    payment_details_callback,
 )
+from bot.keyboards import CALLBACK_TX_DETAILS_PREFIX, PROVIDER_SATISPAY, PROVIDER_SUMUP
 
 # Creazione cartella logs e generazione file di log con data e ora di avvio
 logs_dir = Path("logs")
@@ -67,10 +71,12 @@ async def send_satispay_echo(bot, payment: SatispayPayment):
 
     echo_text = format_satispay_echo(payment)
     try:
+        keyboard = await build_payment_links_keyboard(PROVIDER_SATISPAY, payment.id)
         await bot.send_message(
             chat_id=chat_id,
             text=echo_text,
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=keyboard,
         )
         logger.info(f"Notifica Satispay {payment.id} ({payment.amount_euro:.2f}€) inviata alla chat {chat_id}")
     except Exception as e:
@@ -99,7 +105,8 @@ async def send_sumup_echo(bot, tx: SumUpTransaction):
         return
 
     try:
-        await bot.send_message(chat_id=chat_id, text=format_sumup_echo(tx), parse_mode="HTML")
+        keyboard = await build_payment_links_keyboard(PROVIDER_SUMUP, tx.transaction_code)
+        await bot.send_message(chat_id=chat_id, text=format_sumup_echo(tx), parse_mode="HTML", reply_markup=keyboard)
         logger.info(f"Notifica SumUp {tx.transaction_code} ({tx.amount:.2f}€) inviata alla chat {chat_id}")
     except Exception as e:
         logger.error(f"Errore durante l'invio della notifica SumUp su Telegram: {e}")
@@ -157,6 +164,9 @@ def create_telegram_app():
 
     # Registra il ConversationHandler principale (/write, /w e custom commands)
     conv_handler = build_conversation_handler(custom_cmds)
+    # Il pulsante 🔍 Dettagli va registrato PRIMA della conversazione: i suoi CallbackQueryHandler
+    # senza pattern intercetterebbero il click se l'utente ha un /write in corso
+    app.add_handler(CallbackQueryHandler(payment_details_callback, pattern=f"^{CALLBACK_TX_DETAILS_PREFIX}"))
     app.add_handler(conv_handler)
 
     # Registra handler comandi base

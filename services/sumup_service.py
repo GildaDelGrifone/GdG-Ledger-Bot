@@ -2,6 +2,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Set
+from urllib.parse import quote
 import httpx
 from config import settings
 from core.models import SumUpTransaction
@@ -9,6 +10,14 @@ from core.models import SumUpTransaction
 logger = logging.getLogger(__name__)
 
 SUMUP_BASE_URL = "https://api.sumup.com"
+
+# Ricevuta pubblica di una transazione (non richiede login)
+SUMUP_RECEIPT_URL = (
+    "https://sales-receipt.sumup.com/pos/public/v1/{merchant_code}/receipt/transaction:{code}?format=html"
+)
+
+# Stati definitivi: le transazioni salvate con uno di questi stati non vengono più ricontrollate
+SUMUP_FINAL_STATUSES = {"SUCCESSFUL", "FAILED", "CANCELLED", "REFUNDED"}
 
 
 def parse_sumup_timestamp(value: Optional[str]) -> Optional[datetime]:
@@ -71,6 +80,7 @@ class SumUpService:
             type=item.get("type"),
             payment_type=item.get("payment_type"),
             card_type=item.get("card_type") or card.get("type"),
+            card_last4=card.get("last_4_digits"),
             user=item.get("user"),
             timestamp=item.get("timestamp"),
         )
@@ -96,8 +106,19 @@ class SumUpService:
             logger.error(f"Eccezione durante recupero storico SumUp: {e}")
         return []
 
-    async def get_transaction(self, transaction_code: str) -> Optional[SumUpTransaction]:
-        """Recupera una singola transazione dato il transaction_code"""
+    async def receipt_url(self, transaction_code: str) -> Optional[str]:
+        """Link alla ricevuta pubblica SumUp della transazione (None se il merchant code non è disponibile)"""
+        if not self.is_configured:
+            return None
+        merchant_code = await self._get_merchant_code()
+        if not merchant_code:
+            return None
+        return SUMUP_RECEIPT_URL.format(
+            merchant_code=quote(merchant_code, safe=""), code=quote(transaction_code, safe="")
+        )
+
+    async def get_transaction_raw(self, transaction_code: str) -> Optional[Dict[str, Any]]:
+        """Recupera il JSON completo di una transazione dato il transaction_code"""
         if not self.is_configured:
             return None
         merchant_code = await self._get_merchant_code()
@@ -111,11 +132,16 @@ class SumUpService:
                     url, headers=self._headers(), params={"transaction_code": transaction_code}, timeout=10.0
                 )
             if res.status_code == 200:
-                return self._parse_item(res.json())
+                return res.json()
             logger.error(f"Errore SumUp GET transaction ({res.status_code}): {res.text}")
         except Exception as e:
             logger.error(f"Eccezione durante recupero transazione SumUp: {e}")
         return None
+
+    async def get_transaction(self, transaction_code: str) -> Optional[SumUpTransaction]:
+        """Recupera una singola transazione dato il transaction_code"""
+        data = await self.get_transaction_raw(transaction_code)
+        return self._parse_item(data) if data else None
 
     async def poll_new_transactions(self) -> List[SumUpTransaction]:
         """
@@ -137,11 +163,25 @@ class SumUpService:
 
         new_transactions: List[SumUpTransaction] = []
         for t in sorted(transactions, key=lambda x: x.timestamp or ""):
-            if not db_service.has_sumup_transaction(t.transaction_code):
+            stored = db_service.get_sumup_by_code(t.transaction_code)
+            if stored is None:
                 db_service.save_sumup_transaction(t)
                 if t.status == "SUCCESSFUL":
                     new_transactions.append(t)
                     logger.info(f"[SumUp Polling] Rilevata nuova transazione: {t.transaction_code} ({t.amount:.2f}€)")
+                continue
+
+            # Transazione già nota ma non ancora definitiva (es. PENDING al momento del primo polling):
+            # si ricontrolla lo stato e si notifica quando diventa SUCCESSFUL
+            if stored.status in SUMUP_FINAL_STATUSES or stored.status == t.status:
+                continue
+            db_service.update_sumup_transaction(t)
+            if t.status == "SUCCESSFUL":
+                new_transactions.append(t)
+                logger.info(
+                    f"[SumUp Polling] Transazione {t.transaction_code} confermata "
+                    f"({stored.status} -> SUCCESSFUL, {t.amount:.2f}€)"
+                )
         return new_transactions
 
     async def find_new_payment(

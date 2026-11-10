@@ -1,3 +1,4 @@
+from typing import Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # Callback data constants
@@ -20,6 +21,10 @@ CALLBACK_CASH_USE_RED = "cash:use_red"
 CALLBACK_CASH_USE_BLUE = "cash:use_blue"
 CALLBACK_TRANSFER_BLUE_TO_RED = "transfer:blue_to_red"
 CALLBACK_TRANSFER_RED_TO_BLUE = "transfer:red_to_blue"
+# Dettagli live di un pagamento: "txd:sat:<id_satispay>" o "txd:sum:<transaction_code>"
+CALLBACK_TX_DETAILS_PREFIX = "txd:"
+PROVIDER_SATISPAY = "sat"
+PROVIDER_SUMUP = "sum"
 
 
 
@@ -136,3 +141,19 @@ def get_transfer_direction_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❌ Annulla", callback_data=CALLBACK_CANCEL)]
     ]
     return InlineKeyboardMarkup(buttons)
+
+
+def get_payment_links_keyboard(provider: str, ref: str, url: Optional[str] = None) -> Optional[InlineKeyboardMarkup]:
+    """
+    Tastiera sotto le notifiche Satispay/SumUp: link alla dashboard/ricevuta (se disponibile)
+    e pulsante per i dettagli aggiornati della transazione via API
+    """
+    buttons = []
+    if url:
+        label = "🌐 Dashboard Satispay" if provider == PROVIDER_SATISPAY else "🧾 Ricevuta SumUp"
+        buttons.append(InlineKeyboardButton(label, url=url))
+    callback_data = f"{CALLBACK_TX_DETAILS_PREFIX}{provider}:{ref}"
+    # Telegram limita callback_data a 64 byte: oltre si mostra solo il link
+    if len(callback_data.encode("utf-8")) <= 64:
+        buttons.append(InlineKeyboardButton("🔍 Dettagli", callback_data=callback_data))
+    return InlineKeyboardMarkup([buttons]) if buttons else None

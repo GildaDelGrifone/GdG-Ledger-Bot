@@ -61,6 +61,63 @@ async def test_poll_new_transactions_behavior(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_poll_notifies_pending_transaction_once_confirmed(monkeypatch):
+    service = SumUpService()
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+        test_db = DatabaseService(tmp.name)
+        monkeypatch.setattr("services.db_service.db_service", test_db)
+
+        t0 = _tx("T0", ts=_ts(-60))
+        service.get_transactions_history = AsyncMock(return_value=[t0])
+        assert await service.poll_new_transactions() == []  # sincronizzazione iniziale
+
+        # Il polling vede il pagamento mentre è ancora PENDING: salvato ma non notificato
+        pending = _tx("P1", 20.0, status="PENDING", ts=_ts(-10))
+        pending.card_type = "UNKNOWN"
+        service.get_transactions_history = AsyncMock(return_value=[pending, t0])
+        assert await service.poll_new_transactions() == []
+        assert test_db.get_sumup_by_code("P1").status == "PENDING"
+
+        # Ancora PENDING: nessuna notifica
+        assert await service.poll_new_transactions() == []
+
+        # Diventa SUCCESSFUL: notificato una sola volta e stato aggiornato nel DB
+        confirmed = _tx("P1", 20.0, status="SUCCESSFUL", ts=pending.timestamp)
+        service.get_transactions_history = AsyncMock(return_value=[confirmed, t0])
+        new = await service.poll_new_transactions()
+        assert [t.transaction_code for t in new] == ["P1"]
+        stored = test_db.get_sumup_by_code("P1")
+        assert stored.status == "SUCCESSFUL"
+        assert stored.card_type == "VISA"
+
+        # Nessun duplicato ai polling successivi
+        assert await service.poll_new_transactions() == []
+
+
+@pytest.mark.asyncio
+async def test_poll_pending_transaction_that_fails_is_not_notified(monkeypatch):
+    service = SumUpService()
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+        test_db = DatabaseService(tmp.name)
+        monkeypatch.setattr("services.db_service.db_service", test_db)
+
+        t0 = _tx("T0", ts=_ts(-60))
+        service.get_transactions_history = AsyncMock(return_value=[t0])
+        await service.poll_new_transactions()
+
+        pending = _tx("P2", status="PENDING", ts=_ts(-10))
+        service.get_transactions_history = AsyncMock(return_value=[pending, t0])
+        assert await service.poll_new_transactions() == []
+
+        failed = _tx("P2", status="FAILED", ts=pending.timestamp)
+        service.get_transactions_history = AsyncMock(return_value=[failed, t0])
+        assert await service.poll_new_transactions() == []
+        assert test_db.get_sumup_by_code("P2").status == "FAILED"
+
+
+@pytest.mark.asyncio
 async def test_find_new_payment_ignores_amount():
     service = SumUpService()
     since = datetime.now(timezone.utc)

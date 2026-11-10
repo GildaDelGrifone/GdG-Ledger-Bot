@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from typing import Optional, Dict, Tuple
 import httpx
-from telegram import Update
+from telegram import InlineKeyboardMarkup, Update
 from telegram.error import NetworkError, TimedOut
 from telegram.ext import ContextTypes
 from core.security import restricted
@@ -15,6 +15,13 @@ from services.sheets_service import get_sheets_service
 from services.db_service import db_service
 from services.satispay_service import satispay_service
 from services.sumup_service import sumup_service
+from bot.conversation import ack_callback_query
+from bot.keyboards import (
+    CALLBACK_TX_DETAILS_PREFIX,
+    PROVIDER_SATISPAY,
+    PROVIDER_SUMUP,
+    get_payment_links_keyboard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +161,11 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Le transazioni SumUp vengono notificate in chat; <code>/link</code> e <code>/unlink</code> funzionano allo stesso modo (colonna <i>ID SumUp</i>).\n"
         "• <code>/sumup_list [data]</code> (<code>/sul</code>): Transazioni SumUp della data (o di oggi).\n"
         "• <code>/sumup_list_range &lt;da&gt; &lt;a&gt;</code> (<code>/sulr</code>): Transazioni in un intervallo.\n"
-        "• <code>/sumup_get &lt;codice&gt;</code> (<code>/sug</code>): Richiama la notifica di una transazione.\n"
+        "• <code>/sumup_get &lt;codice&gt;</code> (<code>/sug</code>): Richiama la notifica di una transazione.\n\n"
+        "🔹 <b>Dashboard e dettagli:</b>\n"
+        "Sotto le notifiche e i risultati di <code>/sat_get</code> e <code>/sumup_get</code> trovi i pulsanti "
+        "🌐 <i>Dashboard Satispay</i> / 🧾 <i>Ricevuta SumUp</i> e 🔍 <i>Dettagli</i> "
+        "(stato aggiornato, carta usata con le ultime 4 cifre, ecc.).\n"
     )
     await update.effective_chat.send_message(help_text, parse_mode="HTML")
 @restricted
@@ -393,7 +404,8 @@ async def sat_get_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     echo_msg = format_satispay_echo(payment)
-    await update.effective_chat.send_message(echo_msg, parse_mode="HTML")
+    keyboard = await build_payment_links_keyboard(PROVIDER_SATISPAY, payment.id)
+    await update.effective_chat.send_message(echo_msg, parse_mode="HTML", reply_markup=keyboard)
 
 
 def _format_sumup_line(idx: int, t: SumUpTransaction) -> str:
@@ -495,7 +507,129 @@ async def sumup_get_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.effective_chat.send_message(format_sumup_echo(tx), parse_mode="HTML")
+    keyboard = await build_payment_links_keyboard(PROVIDER_SUMUP, tx.transaction_code)
+    await update.effective_chat.send_message(format_sumup_echo(tx), parse_mode="HTML", reply_markup=keyboard)
+
+
+# ----------------------------------------------------------------------
+# Link alla dashboard/ricevuta e dettagli live dei pagamenti
+# ----------------------------------------------------------------------
+async def build_payment_links_keyboard(provider: str, ref: str):
+    """Tastiera con link (dashboard Satispay o ricevuta SumUp) e pulsante Dettagli per un pagamento"""
+    if provider == PROVIDER_SATISPAY:
+        url = satispay_service.dashboard_url(ref)
+    else:
+        url = await sumup_service.receipt_url(ref)
+    return get_payment_links_keyboard(provider, ref, url)
+
+
+def _format_iso_datetime(value) -> Optional[str]:
+    """Converte un timestamp ISO delle API in DD/MM/YYYY HH:MM:SS (ora locale); altrimenti lo restituisce invariato"""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()
+    return dt.strftime("%d/%m/%Y %H:%M:%S")
+
+
+def _details_lines(rows) -> str:
+    """Compone le righe 'etichetta: valore' saltando i valori mancanti ed escapando il testo"""
+    lines = []
+    for label, value in rows:
+        if value is None or value == "":
+            continue
+        lines.append(f"{label}: <code>{html.escape(str(value))}</code>")
+    return "\n".join(lines)
+
+
+def format_satispay_details(raw: Dict) -> str:
+    """Dettagli aggiornati di un pagamento Satispay (JSON dell'API GET payment)"""
+    sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+    amount = raw.get("amount_unit")
+    rows = [
+        ("📌 <b>Stato</b>", raw.get("status")),
+        ("💰 <b>Importo</b>", f"{amount / 100:.2f} {raw.get('currency', 'EUR')}" if isinstance(amount, (int, float)) else None),
+        ("🔁 <b>Flusso</b>", raw.get("flow")),
+        ("📥 <b>Mittente</b>", sender.get("name") or raw.get("sender_value") or raw.get("consumer_name")),
+        ("⏰ <b>Data</b>", _format_iso_datetime(raw.get("insert_date"))),
+        ("⌛ <b>Scadenza</b>", _format_iso_datetime(raw.get("expire_date"))),
+        ("🏷️ <b>Codice</b>", raw.get("code_identifier")),
+        ("🔗 <b>Codice esterno</b>", raw.get("external_code")),
+        ("📝 <b>Note</b>", raw.get("comment") or raw.get("description")),
+        ("🆔 <b>ID Satispay</b>", raw.get("id")),
+    ]
+    return "🔍 <b>Dettagli pagamento Satispay</b>\n\n" + _details_lines(rows)
+
+
+def format_sumup_details(raw: Dict) -> str:
+    """Dettagli aggiornati di una transazione SumUp (JSON dell'API GET transaction)"""
+    card = raw.get("card") if isinstance(raw.get("card"), dict) else {}
+    currency = raw.get("currency", "EUR")
+    card_text = " ".join(filter(None, [
+        card.get("type") or raw.get("card_type"),
+        f"•••• {card['last_4_digits']}" if card.get("last_4_digits") else None,
+    ]))
+
+    def money(value):
+        return f"{float(value):.2f} {currency}" if isinstance(value, (int, float)) and value else None
+
+    rows = [
+        ("📌 <b>Stato</b>", raw.get("status")),
+        ("💰 <b>Importo</b>", money(raw.get("amount"))),
+        ("🙏 <b>Mancia</b>", money(raw.get("tip_amount"))),
+        ("💳 <b>Carta</b>", card_text or None),
+        ("📲 <b>Modalità</b>", " / ".join(filter(None, [raw.get("entry_mode"), raw.get("verification_method")])) or None),
+        ("👤 <b>Operatore</b>", raw.get("username") or raw.get("user")),
+        ("⏰ <b>Data</b>", _format_iso_datetime(raw.get("timestamp"))),
+        ("↩️ <b>Rimborsato</b>", money(raw.get("refunded_amount"))),
+        ("🏦 <b>Payout</b>", raw.get("payout_type") or raw.get("payout_plan")),
+        ("🆔 <b>ID SumUp</b>", raw.get("transaction_code")),
+    ]
+    return "🔍 <b>Dettagli transazione SumUp</b>\n\n" + _details_lines(rows)
+
+
+@restricted
+async def payment_details_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pulsante 🔍 Dettagli: recupera la transazione aggiornata dall'API e risponde alla notifica"""
+    await ack_callback_query(update)
+    query = update.callback_query
+    data = (query.data or "")[len(CALLBACK_TX_DETAILS_PREFIX):]
+    provider, _, ref = data.partition(":")
+    if provider not in (PROVIDER_SATISPAY, PROVIDER_SUMUP) or not ref:
+        return
+
+    if provider == PROVIDER_SATISPAY:
+        raw = await satispay_service.get_payment_raw(ref)
+        text = format_satispay_details(raw) if raw else None
+        provider_name = "Satispay"
+    else:
+        raw = await sumup_service.get_transaction_raw(ref)
+        text = format_sumup_details(raw) if raw else None
+        provider_name = "SumUp"
+
+    reply_to = query.message.message_id if query.message else None
+    if not text:
+        await update.effective_chat.send_message(
+            f"❌ Impossibile recuperare i dettagli {provider_name} di <code>{html.escape(ref)}</code>. Riprova più tardi.",
+            parse_mode="HTML",
+            reply_to_message_id=reply_to,
+        )
+        return
+
+    keyboard = await build_payment_links_keyboard(provider, ref)
+    # Nella risposta basta il link: il pulsante Dettagli è già sulla notifica
+    url_only = None
+    if keyboard:
+        url_buttons = [b for b in keyboard.inline_keyboard[0] if b.url]
+        if url_buttons:
+            url_only = InlineKeyboardMarkup([url_buttons])
+    await update.effective_chat.send_message(
+        text, parse_mode="HTML", reply_markup=url_only, reply_to_message_id=reply_to
+    )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
