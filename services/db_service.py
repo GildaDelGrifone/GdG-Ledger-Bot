@@ -217,6 +217,35 @@ class DatabaseService:
                 logger.info(f"[SQLite] Salvata transazione SumUp: {tx.transaction_code} ({tx.amount:.2f}€)")
             return inserted
 
+    def update_sumup_transaction(self, tx: SumUpTransaction) -> bool:
+        """
+        Aggiorna stato e dettagli di una transazione SumUp già salvata (es. PENDING -> SUCCESSFUL).
+        Restituisce True se lo stato salvato è cambiato
+        """
+        stored = self.get_sumup_by_code(tx.transaction_code)
+        if stored is None:
+            return False
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE sumup_transactions
+                SET status = ?, amount = ?, type = ?, payment_type = ?, card_type = ?
+                WHERE transaction_code = ?;
+            """, (
+                tx.status,
+                tx.amount,
+                tx.type or stored.type,
+                tx.payment_type or stored.payment_type,
+                tx.card_type or stored.card_type,
+                tx.transaction_code,
+            ))
+            conn.commit()
+        changed = stored.status != tx.status
+        if changed:
+            logger.info(
+                f"[SQLite] Stato transazione SumUp {tx.transaction_code} aggiornato: {stored.status} -> {tx.status}"
+            )
+        return changed
+
     def get_sumup_by_code(self, transaction_code: str) -> Optional[SumUpTransaction]:
         """Recupera una transazione SumUp dato il suo transaction_code"""
         with self._get_connection() as conn:

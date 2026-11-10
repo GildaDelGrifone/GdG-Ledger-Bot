@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 
 SUMUP_BASE_URL = "https://api.sumup.com"
 
+# Stati definitivi: le transazioni salvate con uno di questi stati non vengono più ricontrollate
+SUMUP_FINAL_STATUSES = {"SUCCESSFUL", "FAILED", "CANCELLED", "REFUNDED"}
+
 
 def parse_sumup_timestamp(value: Optional[str]) -> Optional[datetime]:
     """Converte un timestamp ISO SumUp (es. 2026-10-29T10:00:00.123Z) in datetime UTC"""
@@ -137,11 +140,25 @@ class SumUpService:
 
         new_transactions: List[SumUpTransaction] = []
         for t in sorted(transactions, key=lambda x: x.timestamp or ""):
-            if not db_service.has_sumup_transaction(t.transaction_code):
+            stored = db_service.get_sumup_by_code(t.transaction_code)
+            if stored is None:
                 db_service.save_sumup_transaction(t)
                 if t.status == "SUCCESSFUL":
                     new_transactions.append(t)
                     logger.info(f"[SumUp Polling] Rilevata nuova transazione: {t.transaction_code} ({t.amount:.2f}€)")
+                continue
+
+            # Transazione già nota ma non ancora definitiva (es. PENDING al momento del primo polling):
+            # si ricontrolla lo stato e si notifica quando diventa SUCCESSFUL
+            if stored.status in SUMUP_FINAL_STATUSES or stored.status == t.status:
+                continue
+            db_service.update_sumup_transaction(t)
+            if t.status == "SUCCESSFUL":
+                new_transactions.append(t)
+                logger.info(
+                    f"[SumUp Polling] Transazione {t.transaction_code} confermata "
+                    f"({stored.status} -> SUCCESSFUL, {t.amount:.2f}€)"
+                )
         return new_transactions
 
     async def find_new_payment(

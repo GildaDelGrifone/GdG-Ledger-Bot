@@ -46,7 +46,7 @@ Telegram Bot professionale per la tenuta del registro contabile (Ledger), gestio
   * È sempre disponibile il pulsante per saltare l'attesa del pagamento e procedere comunque con la registrazione manuale sul foglio.
 
 * **Integrazione SumUp (Polling + SQLite)**:
-  * Il bot interroga periodicamente lo storico transazioni SumUp (`SUMUP_API_KEY`), le salva in SQLite e notifica i nuovi incassi in chat, con Offline Catch-up come per Satispay.
+  * Il bot interroga periodicamente lo storico transazioni SumUp (`SUMUP_API_KEY`), le salva in SQLite e notifica i nuovi incassi in chat, con Offline Catch-up come per Satispay. Le transazioni ancora in attesa (`PENDING`) vengono ricontrollate a ogni polling e notificate appena risultano completate.
   * **Metodo SumUp in `/write`**: per le entrate il bot può attendere il pagamento sul terminale (**SumUp 3G+**) oppure generare un **QR con link di pagamento**. Il bot collega la prima transazione SumUp completata senza verificarne l'importo (sul foglio resta quello inserito) e il pulsante **Salta pagamento e registra** permette di proseguire senza ID SumUp (disattivabile con `SUMUP_QR_ENABLED=false`). A pagamento avvenuto il codice transazione viene scritto nella colonna P `ID SumUp` del foglio.
   * **Comandi**: `/sumup_list [data]` (`/sul`), `/sumup_list_range <da> <a>` (`/sulr`), `/sumup_get <codice>` (`/sug`). `/link` e `/unlink` funzionano anche sulle notifiche SumUp.
 
